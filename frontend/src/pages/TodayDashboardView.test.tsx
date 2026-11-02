@@ -96,7 +96,7 @@ describe("TodayDashboardView visual and structural requirements", { timeout: 150
     expect(mockSetAllTasks).not.toHaveBeenCalled();
   });
 
-  it("moves an exact-time task to overdue as the clock passes while the page stays open", async () => {
+  it("keeps an exact-time task in Today for the rest of its day and moves it to overdue after midnight", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date(2030, 2, 4, 12, 0));
     mockTasks = [{ id: "clock-task", user_id: "user-123", title: "Clock task", completed: false, status: "todo", priority: "none", schedule_v: 2,
@@ -104,6 +104,11 @@ describe("TodayDashboardView visual and structural requirements", { timeout: 150
     const { container } = render(<MemoryRouter><TodayDashboardView /></MemoryRouter>);
     expect(screen.queryByText("Overdue")).toBeNull();
     await act(async () => { vi.advanceTimersByTime(120000); });
+    // A clock time on the same day stays in Today; only the next day is late.
+    expect(screen.queryByText("Overdue")).toBeNull();
+    expect(screen.getByText("Clock task")).toBeInTheDocument();
+    expect(container.querySelectorAll(".swipe-row")).toHaveLength(1);
+    await act(async () => { vi.advanceTimersByTime(12 * 60 * 60 * 1000); });
     expect(screen.getByText("Overdue")).toBeInTheDocument();
     expect(screen.getByText("Clock task")).toBeInTheDocument();
     expect(container.querySelectorAll(".swipe-row")).toHaveLength(1);
@@ -194,23 +199,6 @@ describe("TodayDashboardView visual and structural requirements", { timeout: 150
     // 5. Overdue section is present
     expect(screen.getByText("Overdue")).toBeInTheDocument();
     expect(screen.getByText("Overdue Report")).toBeInTheDocument();
-  });
-
-  it("opens the retained Knowledge source instead of completing an old review task", async () => {
-    mockTasks = [{
-      id: "review-task", title: "Review study cards", due_date: new Date().toISOString(),
-      completed: false, status: "todo", source_type: "leitner", source_id: "doc-7",
-    } as Task];
-    render(
-      <MemoryRouter initialEntries={["/app/today?completeTaskId=review-task"]}>
-        <LocationProbe />
-        <TodayDashboardView />
-      </MemoryRouter>,
-    );
-    await waitFor(() => expect(screen.getByTestId("location-probe")).toHaveTextContent(
-      "/app/recall?docId=doc-7",
-    ));
-    expect(mockSetAllTasks).not.toHaveBeenCalled();
   });
 
   it("uses the full list width until a task is selected and then opens its inspector", () => {
@@ -403,72 +391,6 @@ describe("TodayDashboardView visual and structural requirements", { timeout: 150
     expect(screen.getByText("Big Overarching Project")).toBeInTheDocument();
   });
 
-  it("separates due and overdue study items from ordinary tasks and priorities", () => {
-    mockTasks = [
-      {
-        id: "personal-urgent",
-        user_id: "user-123",
-        title: "Urgent personal task",
-        completed: false,
-        status: "todo",
-        priority: "urgent",
-        due_date: todayIso,
-        folder_id: null,
-        parent_id: null,
-      },
-      {
-        id: "study-due",
-        user_id: "user-123",
-        title: "Leitner cards due today",
-        completed: false,
-        status: "todo",
-        priority: "urgent",
-        due_date: todayIso,
-        source_type: "leitner",
-        source_id: "doc-7",
-        folder_id: null,
-        parent_id: null,
-      },
-      {
-        id: "personal-overdue",
-        user_id: "user-123",
-        title: "Overdue personal task",
-        completed: false,
-        status: "todo",
-        priority: "medium",
-        due_date: yesterdayIso,
-        folder_id: null,
-        parent_id: null,
-      },
-      {
-        id: "study-overdue",
-        user_id: "user-123",
-        title: "Overdue lesson",
-        completed: false,
-        status: "todo",
-        priority: "medium",
-        due_date: yesterdayIso,
-        source_type: "knowledge_doc",
-        source_id: "doc-8",
-        folder_id: null,
-        parent_id: null,
-      },
-    ];
-
-    render(
-      <MemoryRouter>
-        <TodayDashboardView />
-      </MemoryRouter>
-    );
-
-    expect(screen.getByTestId("today-active-tasks")).toHaveTextContent("Urgent personal task");
-    expect(screen.getByTestId("today-active-tasks")).not.toHaveTextContent("Leitner cards due today");
-    expect(screen.getByTestId("study-due-today")).toHaveTextContent("Leitner cards due today");
-    expect(screen.getByTestId("overdue-tasks")).toHaveTextContent("Overdue personal task");
-    expect(screen.getByTestId("overdue-tasks")).not.toHaveTextContent("Overdue lesson");
-    expect(screen.getByTestId("overdue-study")).toHaveTextContent("Overdue lesson");
-  });
-
   it("shows past planned periods with overdue tasks after today's tasks", () => {
     const yesterday = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1);
     const pastDay = `${yesterday.getFullYear()}-${String(yesterday.getMonth() + 1).padStart(2, "0")}-${String(yesterday.getDate()).padStart(2, "0")}`;
@@ -533,17 +455,6 @@ describe("Today leads with one user-chosen next action", () => {
     expect(screen.getByTestId("today-next-change")).toHaveTextContent("Change");
     // The old duplicated header chip is gone.
     expect(screen.queryByTestId("today-next-selection")).not.toBeInTheDocument();
-  });
-
-  it("offers Start review for a study next task and opens the review session", async () => {
-    mockTasks = [{ id: "study-1", user_id: "user-123", title: "Leitner cards", completed: false, status: "todo", priority: "medium", due_date: todayIso, source_type: "leitner", source_id: "doc-7", parent_id: null } as Task];
-    setNext("study-1");
-    render(<MemoryRouter initialEntries={["/app/today"]}><LocationProbe /><TodayDashboardView /></MemoryRouter>);
-
-    const primary = screen.getByTestId("today-next-primary");
-    expect(primary).toHaveTextContent("Start review");
-    fireEvent.click(primary);
-    await waitFor(() => expect(screen.getByTestId("location-probe")).toHaveTextContent("/app/recall?docId=doc-7"));
   });
 
   it("surfaces the live focus runtime controls instead of a second timer", () => {

@@ -223,7 +223,9 @@ describe("CommandPalette search ownership and real cmdk filtering", () => {
     render(<CommandPalette />);
     await openPalette();
     await search("code vault");
-    expect(screen.getByRole("option", { name: "Tools Library" })).toBeVisible();
+    expect(screen.queryByRole("option", { name: "Tools Library" })).not.toBeInTheDocument();
+    await search("quarter");
+    expect(screen.getByRole("option", { name: /Planning/ })).toBeVisible();
     await search("new task");
     expect(screen.getByRole("option", { name: /Create New Task/ })).toBeVisible();
     fireEvent.click(screen.getByRole("option", { name: /Create New Task/ }));

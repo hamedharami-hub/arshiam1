@@ -26,7 +26,7 @@ describe("independent task planning", () => {
     // an exact legacy date is its own day, not a month plan
     expect(getTaskPlanning({ ...task("exact"), due_date: new Date(2026, 4, 3, 15).toISOString(), horizon: "day", is_exact: true }, settings)).toEqual({ horizon: "day", start: "2026-05-03", end: "2026-05-03" });
   });
-  it("judges overdue from the remaining date and time", () => {
+  it("judges overdue by the remaining local day, not by the clock time", () => {
     const today = new Date(2026, 4, 3, 18);
     const yesterday = { ...task("yesterday"), due_date: "2026-05-02" };
     const earlierToday = { ...task("today"), due_date: new Date(2026, 4, 3, 9, 0).toISOString() };
@@ -34,7 +34,9 @@ describe("independent task planning", () => {
     const allDayToday = { ...task("all-day"), work_date: "2026-05-03" };
     expect(isTaskOverdue(yesterday, settings, today)).toBe(true);
     expect(yesterday.due_date).toBe("2026-05-02");
-    expect(isTaskOverdue(earlierToday, settings, today)).toBe(true);
+    // The current day stays in Today even after its clock time; the next day is late.
+    expect(isTaskOverdue(earlierToday, settings, today)).toBe(false);
+    expect(isTaskOverdue({ ...task("yesterday-late"), due_date: new Date(2026, 4, 2, 23, 30).toISOString() }, settings, today)).toBe(true);
     expect(isTaskOverdue(laterToday, settings, today)).toBe(false);
     expect(isTaskOverdue(allDayToday, settings, today)).toBe(false);
     expect(isTaskOverdue({ ...yesterday, completed: true }, settings, today)).toBe(false);

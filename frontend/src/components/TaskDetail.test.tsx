@@ -38,7 +38,7 @@ describe("TaskDetail initial render", () => {
     expect(html).not.toContain("Description");
   });
 
-  it("offers a Leitner review action instead of a generic completion action", () => {
+  it("falls back to ordinary completion for retired study sources", () => {
     const task = {
       id: "review-task-1", user_id: "owner-1", title: "Review pharmacology",
       description: null, completed: false, status: "todo", priority: "none",
@@ -50,6 +50,9 @@ describe("TaskDetail initial render", () => {
       <TaskDetail task={task} mode="page" onClose={() => {}} onChanged={() => {}} setConfirm={() => {}} />,
     );
 
-    expect(html).toContain('aria-label="Open Leitner review"');
+    // The study module is retired in this edition, so a legacy review source
+    // must not offer the removed review action.
+    expect(html).not.toContain('aria-label="Open Leitner review"');
+    expect(html).toContain('aria-label="Complete task"');
   });
 });

@@ -528,7 +528,7 @@ describe("account collection subscription lifetimes", () => {
     await Promise.resolve();
     expect(update).toHaveBeenCalledTimes(1);
     expect(update.mock.calls[0][0]).toEqual([expect.objectContaining({ id: "fresh" })]);
-    if (_name === "daily checkins" || _name === "thought records") expect(update.mock.calls[0][1]).toEqual({ fromCache: false });
+    if ((_name as string) === "daily checkins" || (_name as string) === "thought records") expect(update.mock.calls[0][1]).toEqual({ fromCache: false });
     cleanup();
     receive({ forEach: () => {} });
     expect(update).toHaveBeenCalledTimes(1);

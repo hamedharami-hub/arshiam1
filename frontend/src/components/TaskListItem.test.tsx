@@ -197,7 +197,7 @@ describe("TaskListItem subtasks progress rendering", () => {
     expect(html).toContain("w-4 h-4");
   });
 
-  it("routes active Leitner reviews instead of allowing ordinary completion", () => {
+  it("completes legacy study sources with the ordinary checkbox when review is retired", () => {
     const html = renderToString(
       <TaskListItem
         t={{ ...parentTask, id: "leitner-1", title: "Review lesson", source_type: "leitner", source_id: "doc-1" }}
@@ -225,7 +225,8 @@ describe("TaskListItem subtasks progress rendering", () => {
       />,
     );
 
-    expect(html).toContain('aria-label="Open Leitner review"');
-    expect(html).not.toContain('role="checkbox"');
+    // Review is retired in this edition: the legacy source must behave like a normal task.
+    expect(html).not.toContain('aria-label="Open Leitner review"');
+    expect(html).toContain('role="checkbox"');
   });
 });

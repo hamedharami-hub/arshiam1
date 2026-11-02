@@ -32,7 +32,7 @@ it("swaps existing destinations with keyboard access without navigating", () => 
   expect(screen.getByRole("dialog")).toBeInTheDocument();
   expect(screen.queryByRole("button", { name: "Mind" })).toBeNull();
   fireEvent.click(screen.getByRole("button", { name: "Calendar" }));
-  expect(screen.getByTestId("tabs")).toHaveTextContent("calendar,today,notes,inbox");
+  expect(screen.getByTestId("tabs")).toHaveTextContent("calendar,planning,today,inbox");
   expect(screen.getByTestId("path")).toHaveTextContent("/app/today");
 });
 it("suppresses navigation from a synthetic click after touch hold", () => {
@@ -48,7 +48,7 @@ it("suppresses navigation from a synthetic click after touch hold", () => {
   expect(screen.getByTestId("path")).toHaveTextContent("/app/inbox");
 });
 it("replaces a fallback destination absent from persisted preferences", () => {
-  setMobileBottomTabs(["mind", "knowledge", "planning", "pomodoro"]);
+  setMobileBottomTabs(["planning", "pomodoro", "today", "calendar"]);
   setMobileTabHoldEnabled(true);
   render(<MemoryRouter initialEntries={["/app/inbox"]}><MobileTabSlot tab={ALL_MOBILE_TAB_OPTIONS.today} liveTabs={["planning", "pomodoro", "today", "calendar"]} currentPath="/app/inbox" /><Fixture /></MemoryRouter>);
   fireEvent.keyDown(screen.getByRole("link", { name: "Today" }), { key: "ContextMenu" });
@@ -81,6 +81,6 @@ it("keeps the chooser and saved layout on storage failure", () => {
   vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => { throw new Error("quota"); });
   fireEvent.click(screen.getByRole("button", { name: "Calendar" }));
   expect(screen.getByRole("dialog")).toBeInTheDocument();
-  expect(screen.getByTestId("tabs")).toHaveTextContent("today,calendar,notes,inbox");
+  expect(screen.getByTestId("tabs")).toHaveTextContent("today,planning,calendar,inbox");
   expect(toast.error).toHaveBeenCalled();
 });

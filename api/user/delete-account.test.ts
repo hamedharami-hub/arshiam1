@@ -77,7 +77,19 @@ describe("DELETE /api/user/delete-account", () => {
     expect(mocks.deleteFiles).not.toHaveBeenCalled();
   });
 
-  it.each(["", "http://untrusted.example", "https://account:secret@fastapi.example", "https://fastapi.example?redirect=other"])("diagnoses an absent or unsafe service address without deletion: %s", async (address) => {
+  it("skips the retired companion cleanup when no service address is configured", async () => {
+    vi.stubEnv("ARSH_API_BASE_URL", "");
+    vi.stubEnv("VITE_ARSH_API_URL", "");
+    const res = response();
+    await handler({ method: "DELETE", headers: { authorization: "Bearer account-token" } }, res);
+    // The legacy attachment service no longer ships with this edition, so the
+    // deletion completes on Firebase alone instead of blocking every account.
+    expect(res.statusCode).toBe(200);
+    expect(fetch).not.toHaveBeenCalled();
+    expect(mocks.deleteUser).toHaveBeenCalledWith("owner-123");
+  });
+
+  it.each(["http://untrusted.example", "https://account:secret@fastapi.example", "https://fastapi.example?redirect=other"])("diagnoses an unsafe service address without deletion: %s", async (address) => {
     vi.stubEnv("ARSH_API_BASE_URL", address);
     vi.stubEnv("VITE_ARSH_API_URL", "");
     const res = response();

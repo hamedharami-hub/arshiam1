@@ -17,14 +17,14 @@ describe("MobileBottomBarSettings", () => {
   it("updates a selected slot and keeps four configured tabs unique", () => {
     render(<MobileBottomBarSettings isEn />);
 
-    fireEvent.click(screen.getByTestId("mobile-bottom-tab-option-0-mind"));
-    expect(screen.getByTestId("mobile-bottom-tab-option-0-mind")).toHaveAttribute("aria-pressed", "true");
-    expect(renderHook(() => useMobileBottomTabs()).result.current).toEqual(["mind", ...DEFAULT_MOBILE_BOTTOM_TABS.slice(1)]);
+    fireEvent.click(screen.getByTestId("mobile-bottom-tab-option-0-notes"));
+    expect(screen.getByTestId("mobile-bottom-tab-option-0-notes")).toHaveAttribute("aria-pressed", "true");
+    expect(renderHook(() => useMobileBottomTabs()).result.current).toEqual(["notes", ...DEFAULT_MOBILE_BOTTOM_TABS.slice(1)]);
   });
   it("does not claim success or change selected settings when persistence fails", () => {
     render(<MobileBottomBarSettings isEn />);
     vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => { throw new Error("quota"); });
-    fireEvent.click(screen.getByTestId("mobile-bottom-tab-option-0-mind"));
+    fireEvent.click(screen.getByTestId("mobile-bottom-tab-option-0-notes"));
     fireEvent.click(screen.getByRole("switch", { name: "Tab long press" }));
     fireEvent.click(screen.getByRole("button", { name: "Reset Defaults" }));
     expect(screen.getByTestId("mobile-bottom-tab-option-0-today")).toHaveAttribute("aria-pressed", "true");

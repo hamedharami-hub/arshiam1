@@ -44,11 +44,12 @@ describe("settings navigation", () => {
     const headings = screen.getAllByRole("heading").map((heading) => heading.textContent || "");
     const sidebarSettingsIndex = headings.findIndex((heading) => /Sidebar & Icons Settings|تنظیمات نوار کناری/.test(heading));
     const bottomBarSettingsIndex = headings.findIndex((heading) => /Bottom navigation|نوار پایین موبایل/.test(heading));
-    const lifeArchitectIndex = headings.findIndex((heading) => /Life Architect & System Design|معمار هوشمند زندگی/.test(heading));
+    const dailyExtrasIndex = headings.findIndex((heading) => /Daily extras|امکانات روزانه/.test(heading));
 
     expect(sidebarSettingsIndex).toBeGreaterThanOrEqual(0);
     expect(bottomBarSettingsIndex).toBeGreaterThanOrEqual(0);
-    expect(sidebarSettingsIndex).toBeLessThan(lifeArchitectIndex);
-    expect(bottomBarSettingsIndex).toBeLessThan(lifeArchitectIndex);
+    expect(dailyExtrasIndex).toBeGreaterThanOrEqual(0);
+    expect(sidebarSettingsIndex).toBeLessThan(bottomBarSettingsIndex);
+    expect(bottomBarSettingsIndex).toBeLessThan(dailyExtrasIndex);
   });
 });

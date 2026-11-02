@@ -80,7 +80,6 @@ describe("TaskDetailBottomRail Add Menu", () => {
     expect(screen.getByText(/افزودن نوت/i)).toBeInTheDocument();
     expect(screen.getByText(/اتصال سند آموزشی/i)).toBeInTheDocument();
     expect(screen.getByText(/افزودن موقعیت مکانی/i)).toBeInTheDocument();
-    expect(screen.getByText(/شخص \/ مخاطب/i)).toBeInTheDocument();
   });
 
   it("triggers callbacks when options are clicked", () => {
@@ -100,9 +99,5 @@ describe("TaskDetailBottomRail Add Menu", () => {
     fireEvent.click(addBtn);
     fireEvent.click(screen.getByText(/افزودن موقعیت مکانی/i));
     expect(defaultProps.onAddLocation).toHaveBeenCalled();
-
-    fireEvent.click(addBtn);
-    fireEvent.click(screen.getByText(/شخص \/ مخاطب/i));
-    expect(defaultProps.onPickContact).toHaveBeenCalled();
   });
 });

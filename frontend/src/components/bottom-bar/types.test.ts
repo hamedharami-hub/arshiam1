@@ -22,11 +22,10 @@ describe("registry-backed bottom tab metadata", () => {
     }
   });
 
-  it("keeps module fallback order and legacy active-route matching", () => {
+  it("drops retired keys, backfills defaults and keeps active-route matching", () => {
     const modules: ModulesState = { ready: true, installed: [], unlocked: [], isAdmin: false, isOwner: false };
     const tabs = getAccessibleMobileTabs(["mind", "knowledge", "notes"], modules).map(withFeatureMetadata);
-    expect(tabs.map((tab) => tab.key)).toEqual(["notes", "today", "calendar", "inbox"]);
-    expect(withFeatureMetadata(ALL_MOBILE_TAB_OPTIONS.mind).match("/app/abc")).toBe(true);
+    expect(tabs.map((tab) => tab.key)).toEqual(["notes", "today", "planning", "calendar"]);
     expect(withFeatureMetadata(ALL_MOBILE_TAB_OPTIONS.pomodoro).match("/app/focus")).toBe(true);
     expect(withFeatureMetadata(ALL_MOBILE_TAB_OPTIONS.today).match("/app")).toBe(true);
   });
