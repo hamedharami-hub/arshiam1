@@ -1,0 +1,173 @@
+import { stopGoalsCloudSync } from "@/lib/kanbanGoals";
+import { startUiPrefsCloudSync } from "@/lib/uiPrefsSync";
+import { createContext, useCallback, useContext, useEffect, useMemo, useState, ReactNode } from "react";
+import {
+  auth,
+  onAuthStateChanged,
+  type FirebaseUser,
+} from "@/lib/firebase";
+import {
+  AppUser,
+  AppSession,
+  clearLegacyAuthStorage,
+  logoutUser,
+  registerWithEmail,
+  loginWithEmail,
+  loginWithGoogle,
+  loginAsGuest,
+} from "@/lib/authService";
+import { stopLiveListeners } from "@/lib/firestoreLive";
+import { startWidgetSessionSync } from "@/lib/androidWidget";
+
+interface AuthContextType {
+  user: AppUser | null;
+  session: AppSession | null;
+  loading: boolean;
+  signOut: () => Promise<void>;
+  setUser: (user: AppUser | null) => void;
+  signInWithEmail: (email: string, pass: string) => Promise<{ success: boolean; user?: AppUser; error?: string }>;
+  signUpWithEmail: (email: string, pass: string, name?: string) => Promise<{ success: boolean; user?: AppUser; error?: string }>;
+  signInWithGoogle: () => Promise<{ success: boolean; user?: AppUser; error?: string; fallbackNeeded?: boolean }>;
+  signInAsGuest: (name?: string) => Promise<{ success: boolean; user?: AppUser; error?: string }>;
+}
+
+const AuthContext = createContext<AuthContextType>({
+  user: null,
+  session: null,
+  loading: true,
+  signOut: async () => {},
+  setUser: () => {},
+  signInWithEmail: async () => ({ success: false, error: "Not initialized" }),
+  signUpWithEmail: async () => ({ success: false, error: "Not initialized" }),
+  signInWithGoogle: async () => ({ success: false, error: "Not initialized" }),
+  signInAsGuest: async () => ({ success: false, error: "Not initialized" }),
+});
+
+function createSessionForUser(appUser: AppUser): AppSession {
+  return { user: appUser };
+}
+
+export function AuthProvider({ children }: { children: ReactNode }) {
+  useEffect(() => startWidgetSessionSync(), []);
+  const [user, setUser] = useState<AppUser | null>(null);
+  const [session, setSession] = useState<AppSession | null>(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    clearLegacyAuthStorage();
+    if (!user?.id) stopGoalsCloudSync();
+    startUiPrefsCloudSync(user?.id ?? null);
+    // Signed out (or switched account): drop the shared Firestore listeners so the
+    // previous account's rows and quota do not survive on this device.
+    if (!user?.id) stopLiveListeners();
+  }, [user?.id]);
+
+  useEffect(() => {
+    // Listen to Firebase Auth state
+    const unsubscribe = onAuthStateChanged(auth, (fbUser: FirebaseUser | null) => {
+      if (fbUser) {
+        const appUser: AppUser = {
+          id: fbUser.uid,
+          uid: fbUser.uid,
+          email: fbUser.email,
+          displayName: fbUser.displayName || fbUser.email?.split("@")[0] || "کاربر",
+          photoURL: fbUser.photoURL,
+          user_metadata: {
+            display_name: fbUser.displayName || fbUser.email?.split("@")[0] || "کاربر",
+            full_name: fbUser.displayName || "",
+            avatar_url: fbUser.photoURL || "",
+          },
+          app_metadata: {
+            provider: fbUser.providerData?.[0]?.providerId || "firebase",
+          },
+          created_at: fbUser.metadata?.creationTime || new Date().toISOString(),
+        };
+        setUser(appUser);
+        setSession(createSessionForUser(appUser));
+      } else {
+        // Never trust a user object from localStorage as authentication.
+        setUser(null);
+        setSession(null);
+      }
+      setLoading(false);
+    });
+
+    return () => {
+      unsubscribe();
+    };
+  }, []);
+
+  const handleSignOut = useCallback(async () => {
+    await logoutUser();
+    setUser(null);
+    setSession(null);
+  }, []);
+
+  const handleSignInEmail = useCallback(async (email: string, pass: string) => {
+    const res = await loginWithEmail(email, pass);
+    if (res.success && res.user) {
+      setUser(res.user);
+      setSession(createSessionForUser(res.user));
+    }
+    return res;
+  }, []);
+
+  const handleSignUpEmail = useCallback(async (email: string, pass: string, name?: string) => {
+    const res = await registerWithEmail(email, pass, name);
+    if (res.success && res.user) {
+      setUser(res.user);
+      setSession(createSessionForUser(res.user));
+    }
+    return res;
+  }, []);
+
+  const handleSignInGoogle = useCallback(async () => {
+    const res = await loginWithGoogle();
+    if (res.success && res.user) {
+      setUser(res.user);
+      setSession(createSessionForUser(res.user));
+    }
+    return res;
+  }, []);
+
+  const handleSignInAsGuest = useCallback(async (name?: string) => {
+    const res = await loginAsGuest(name);
+    if (res.success && res.user) {
+      setUser(res.user);
+      setSession(createSessionForUser(res.user));
+    }
+    return res;
+  }, []);
+
+  const contextValue = useMemo(
+    () => ({
+      user,
+      session,
+      loading,
+      signOut: handleSignOut,
+      setUser,
+      signInWithEmail: handleSignInEmail,
+      signUpWithEmail: handleSignUpEmail,
+      signInWithGoogle: handleSignInGoogle,
+      signInAsGuest: handleSignInAsGuest,
+    }),
+    [
+      user,
+      session,
+      loading,
+      handleSignOut,
+      handleSignInEmail,
+      handleSignUpEmail,
+      handleSignInGoogle,
+      handleSignInAsGuest,
+    ]
+  );
+
+  return (
+    <AuthContext.Provider value={contextValue}>
+      {children}
+    </AuthContext.Provider>
+  );
+}
+
+export const useAuth = () => useContext(AuthContext);

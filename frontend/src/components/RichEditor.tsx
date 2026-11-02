@@ -1,0 +1,564 @@
+import { useBilingual } from "@/hooks/useBilingual";
+import { forwardRef, useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState } from "react";
+import { useEditor, EditorContent } from "@tiptap/react";
+import { BubbleMenu } from "@tiptap/react/menus";
+import StarterKit from "@tiptap/starter-kit";
+import Image from "@tiptap/extension-image";
+import Youtube from "@tiptap/extension-youtube";
+import Placeholder from "@tiptap/extension-placeholder";
+import Highlight from "@tiptap/extension-highlight";
+import TextAlign from "@tiptap/extension-text-align";
+import Underline from "@tiptap/extension-underline";
+import TaskList from "@tiptap/extension-task-list";
+import TaskItem from "@tiptap/extension-task-item";
+import { Table, TableCell, TableHeader, TableRow } from "@tiptap/extension-table";
+import Typography from "@tiptap/extension-typography";
+import {
+  Bold, Italic, Underline as UnderlineIcon, Strikethrough, Heading1, Heading2, Heading3,
+  List, ListOrdered, ListChecks, Quote, Code, Image as ImgIcon, Music, Video, Paperclip,
+  Link as LinkIcon, Highlighter, AlignLeft, AlignCenter, AlignRight, Minus, Sparkles, Loader2,
+  Undo2, Redo2, Wrench,
+} from "lucide-react";
+import { Button } from "@/components/ui/button";
+import { Toggle } from "@/components/ui/toggle";
+import { Separator } from "@/components/ui/separator";
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
+import { uploadMediaFull, type UploadedMedia } from "@/lib/uploadMedia";
+import { useAuth } from "@/hooks/useAuth";
+import { toast } from "sonner";
+import { callAI, getAILanguage } from "@/lib/ai";
+import { editorHtmlFromStored, htmlToMarkdown, markdownToHtml } from "@/lib/markdown";
+import { VoiceInputButton } from "@/components/VoiceInputButton";
+import { LinkDialog } from "@/components/LinkDialog";
+import { TextSelection } from "@tiptap/pm/state";
+import { canTriggerNoteLink, isLinkableNote, noteLinkId, noteLinkUrl, type LinkableNote, type NoteLinkScope } from "@/lib/noteLinks";
+import { NoteLinkPicker } from "@/components/notes/NoteLinkPicker";
+
+const AI_ACTIONS = [
+  { key: "improve", label: "✨ بهبود نگارش" },
+  { key: "summarize", label: "📝 خلاصه کن" },
+  { key: "expand", label: "📖 گسترش بده" },
+  { key: "translate_fa", label: "🇮🇷 ترجمه به فارسی" },
+  { key: "translate_en", label: "🇬🇧 ترجمه به انگلیسی" },
+  { key: "to_list", label: "• تبدیل به لیست" },
+  { key: "fix_grammar", label: "✏️ اصلاح املا و گرامر" },
+  { key: "tone_formal", label: "👔 لحن رسمی‌تر" },
+  { key: "tone_casual", label: "😊 لحن صمیمی‌تر" },
+];
+
+function retainTableHtmlAttributes(names: string[]) {
+  return Object.fromEntries(names.map((name) => [name, {
+    default: null,
+    parseHTML: (element: HTMLElement) => element.getAttribute(name),
+    renderHTML: (attributes: Record<string, unknown>) => attributes[name] == null ? {} : { [name]: attributes[name] },
+  }]));
+}
+
+const PreservingTable = Table.extend({
+  addAttributes() {
+    return { ...this.parent?.(), ...retainTableHtmlAttributes(["class", "id", "title", "style", "border", "cellpadding", "cellspacing"]) };
+  },
+});
+const PreservingTableRow = TableRow.extend({
+  addAttributes() {
+    return { ...this.parent?.(), ...retainTableHtmlAttributes(["class", "id", "title", "style", "height", "align", "valign"]) };
+  },
+});
+const PreservingTableCell = TableCell.extend({
+  addAttributes() {
+    return { ...this.parent?.(), ...retainTableHtmlAttributes(["class", "id", "title", "style", "width", "height", "valign", "bgcolor", "headers"]) };
+  },
+});
+const PreservingTableHeader = TableHeader.extend({
+  addAttributes() {
+    return { ...this.parent?.(), ...retainTableHtmlAttributes(["class", "id", "title", "style", "width", "height", "valign", "bgcolor", "headers", "scope"]) };
+  },
+});
+const PreservingYoutube = Youtube.extend({
+  addAttributes() {
+    return {
+      ...this.parent?.(),
+      title: {
+        default: null,
+        parseHTML: (element: HTMLElement) => element.getAttribute("title"),
+        renderHTML: (attributes: Record<string, unknown>) => attributes.title == null ? {} : { title: attributes.title },
+      },
+    };
+  },
+});
+
+export type RichEditorHandle = {
+  getHtml: () => string;
+  getMarkdown: () => string;
+  focus: () => void;
+  setMarkdown: (markdown: string) => void;
+  insertText: (text: string) => void;
+  insertAttachment: (media: Pick<UploadedMedia, "url" | "name" | "kind">) => void;
+};
+
+export const RichEditor = forwardRef<RichEditorHandle, {
+  initialHtml?: string;
+  controlledHtml?: string;
+  initialMarkdown?: string;
+  /** Markdown to push into the editor when `externalRevision` changes. */
+  externalMarkdown?: string;
+  /** Bumped only for an external replacement (e.g. applying an AI proposal). */
+  externalRevision?: number;
+  onChange?: (html: string, markdown: string) => void;
+  placeholder?: string;
+  readOnly?: boolean;
+  showVoiceButton?: boolean;
+  attachmentScopeId?: string;
+  onAttachmentUploaded?: (media: UploadedMedia) => void;
+  onBusyChange?: (busy: boolean) => void;
+  onSelectedTextChange?: (text: string) => void;
+  compact?: boolean;
+  compactExpanded?: boolean;
+  showToolbar?: boolean;
+  editorAriaLabel?: string;
+  autoFocus?: boolean;
+  noteLinks?: NoteLinkScope;
+}>(function RichEditor({
+  initialHtml = "",
+  controlledHtml,
+  initialMarkdown = "",
+  externalMarkdown,
+  externalRevision,
+  onChange,
+  placeholder: placeholderProp,
+  readOnly = false,
+  showVoiceButton = true,
+  attachmentScopeId = "",
+  onAttachmentUploaded,
+  onBusyChange,
+  onSelectedTextChange,
+  compact = false,
+  compactExpanded = false,
+  showToolbar = true,
+  editorAriaLabel,
+  autoFocus = false,
+  noteLinks,
+}, ref) {
+  const { T } = useBilingual();
+  const placeholder = placeholderProp ?? T("شروع به نوشتن کن…", "Start writing…");
+  const { user } = useAuth();
+  const attachmentIdentity = useRef(""); attachmentIdentity.current = `${user?.id ?? ""}:${attachmentScopeId}`;
+  const onUploadedRef = useRef(onAttachmentUploaded); onUploadedRef.current = onAttachmentUploaded;
+  const busyCallback = useRef(onBusyChange); busyCallback.current = onBusyChange;
+  const selectedTextCallback = useRef(onSelectedTextChange); selectedTextCallback.current = onSelectedTextChange;
+  const uploadCount = useRef(0);
+  const fileRef = useRef<HTMLInputElement>(null);
+  const [pendingKind, setPendingKind] = useState<"image" | "audio" | "video" | "file">("file");
+  const [aiBusy, setAiBusy] = useState(false);
+  const toolbarRef = useRef<HTMLDivElement>(null);
+  const sentinelRef = useRef<HTMLDivElement>(null);
+  const [toolbarOnScreen, setToolbarOnScreen] = useState(true);
+
+  const linkBookmark = useRef<import("@tiptap/pm/state").SelectionBookmark | null>(null);
+  const noteBookmark = useRef<import("@tiptap/pm/state").SelectionBookmark | null>(null);
+  const [notePickerOpen, setNotePickerOpen] = useState(false);
+  const noteShortcut = useRef(false);
+  const noteSelectedText = useRef("");
+  const voiceBookmark = useRef<import("@tiptap/pm/state").SelectionBookmark | null>(null);
+  const readOnlyRef = useRef(readOnly);
+  readOnlyRef.current = readOnly;
+  const onChangeRef = useRef(onChange);
+  onChangeRef.current = onChange;
+  const insertFileRef = useRef<(file: File) => Promise<unknown>>(async () => {});
+  // TipTap reapplies options after every render. A saved note must not feed
+  // that conversion back in, or opening it retriggers until the page freezes.
+  const seededContent = useRef<string | null>(null);
+  if (seededContent.current === null) {
+    seededContent.current = initialHtml || (initialMarkdown ? editorHtmlFromStored(initialMarkdown) : "");
+  }
+  // Only an explicit revision bump replaces the document; ordinary typing never re-seeds it.
+  const appliedExternalRevision = useRef<number | undefined>(undefined);
+  const extensions = useMemo(() => [
+    StarterKit.configure({
+      heading: { levels: [1, 2, 3] },
+      link: { openOnClick: false, autolink: true },
+      code: { HTMLAttributes: { dir: "ltr" } },
+      codeBlock: { HTMLAttributes: { dir: "ltr" } },
+      underline: false,
+    }),
+    Underline,
+    Highlight.configure({ multicolor: false }),
+    TextAlign.configure({ types: ["heading", "paragraph"] }),
+    Image.configure({ inline: false, allowBase64: true }),
+    PreservingYoutube.configure({ controls: true, nocookie: true }),
+    PreservingTable.configure({ resizable: false, renderWrapper: false }),
+    PreservingTableRow,
+    PreservingTableHeader,
+    PreservingTableCell,
+    TaskList,
+    TaskItem.configure({ nested: true }),
+    Typography,
+    Placeholder.configure({ placeholder }),
+  ], [placeholder]);
+  const editorProps = useMemo(() => ({
+    attributes: {
+      dir: "auto",
+      class: compact
+        ? `prose-note focus:outline-none ${compactExpanded ? "min-h-[260px]" : "min-h-[72px]"} px-1`
+        : "prose-note focus:outline-none min-h-[50vh] px-1",
+      ...(editorAriaLabel ? { "aria-label": editorAriaLabel, role: "textbox", "aria-multiline": "true" } : {}),
+    },
+    handleDrop: (_view: unknown, event: any, _slice: unknown, moved: boolean) => {
+      if (readOnlyRef.current) { event.preventDefault(); return true; }
+      if (moved) return false;
+      const files = Array.from(event.dataTransfer?.files || []) as File[];
+      if (!files.length) return false;
+      event.preventDefault();
+      void (async () => { for (const file of files) await insertFileRef.current(file); })();
+      return true;
+    },
+    handlePaste: (_view: unknown, event: any) => {
+      if (readOnlyRef.current) { event.preventDefault(); return true; }
+      const files = Array.from(event.clipboardData?.files || []) as File[];
+      if (!files.length) return false;
+      event.preventDefault();
+      void (async () => { for (const file of files) await insertFileRef.current(file); })();
+      return true;
+    },
+  }), [compact, compactExpanded, editorAriaLabel]);
+
+  const editor = useEditor({
+    editable: !readOnly,
+    shouldRerenderOnTransaction: true,
+    extensions,
+    content: seededContent.current,
+    onContentError: () => undefined,
+    onTransaction: ({ transaction }) => {
+      if (linkBookmark.current) linkBookmark.current = linkBookmark.current.map(transaction.mapping);
+      if (voiceBookmark.current) voiceBookmark.current = voiceBookmark.current.map(transaction.mapping);
+      if (noteBookmark.current) noteBookmark.current = noteBookmark.current.map(transaction.mapping);
+    },
+    onUpdate: ({ editor, transaction }) => {
+      if (!transaction.docChanged) return;
+      try {
+        const html = editor.getHTML();
+        onChangeRef.current?.(html, htmlToMarkdown(html));
+      } catch {
+        /* A previously saved note must not take the page down if its HTML cannot be converted. */
+      }
+      const { from, to } = editor.state.selection;
+      selectedTextCallback.current?.(from === to ? "" : editor.state.doc.textBetween(from, to, "\n").trim());
+    },
+    editorProps,
+  });
+
+  useEffect(() => {
+    if (!editor) return;
+    const publishSelection = () => {
+      if (editor.isDestroyed) return;
+      const { from, to } = editor.state.selection;
+      selectedTextCallback.current?.(from === to ? "" : editor.state.doc.textBetween(from, to, "\n").trim());
+    };
+    editor.on("selectionUpdate", publishSelection);
+    publishSelection();
+    return () => { editor.off("selectionUpdate", publishSelection); };
+  }, [editor]);
+
+  useEffect(() => {
+    if (autoFocus && editor && !readOnly && !editor.isDestroyed) editor.commands.focus();
+  }, [autoFocus, editor, readOnly]);
+
+  useEffect(() => {
+    if (!editor || !noteLinks || readOnly) return;
+    const shortcut = () => {
+      if (editor.isDestroyed || editor.view.composing || noteBookmark.current || editor.isActive("code") || editor.isActive("codeBlock") || editor.isActive("link")) return;
+      const { from, empty, $from } = editor.state.selection;
+      const text = $from.parent.textBetween(0, $from.parentOffset, "\n");
+      if (!empty || !canTriggerNoteLink(text, text.length)) return;
+      noteBookmark.current = TextSelection.create(editor.state.doc, from - 2, from).getBookmark();
+      noteShortcut.current = true;
+      noteSelectedText.current = "[[";
+      setNotePickerOpen(true);
+    };
+    editor.on("update", shortcut);
+    return () => { editor.off("update", shortcut); };
+  }, [editor, noteLinks, readOnly]);
+
+  const openNotePicker = () => {
+    if (!editor || readOnly || editor.isActive("code") || editor.isActive("codeBlock")) return;
+    noteBookmark.current = editor.state.selection.getBookmark();
+    noteShortcut.current = false;
+    noteSelectedText.current = editor.state.doc.textBetween(editor.state.selection.from, editor.state.selection.to, " ");
+    setNotePickerOpen(true);
+  };
+  const closeNotePicker = () => {
+    setNotePickerOpen(false);
+    if (editor && !editor.isDestroyed && noteBookmark.current) {
+      const selection = noteBookmark.current.resolve(editor.state.doc);
+      editor.chain().focus().setTextSelection(selection.to).run();
+    }
+    noteBookmark.current = null;
+  };
+  const insertNoteLink = (note: LinkableNote) => {
+    if (!editor || editor.isDestroyed || readOnly || !noteLinks || !isLinkableNote(note, noteLinks.ownerId) || !noteBookmark.current) return;
+    const selection = noteBookmark.current.resolve(editor.state.doc);
+    const currentText = editor.state.doc.textBetween(selection.from, selection.to, " ");
+    if (currentText !== noteSelectedText.current) {
+      closeNotePicker();
+      toast.error(T("متن انتخاب‌شده تغییر کرده؛ دوباره انتخاب کن", "Selected text changed; please select it again"));
+      return;
+    }
+    const label = noteShortcut.current ? "" : currentText;
+    noteBookmark.current = null;
+    editor.chain().focus().insertContentAt({ from: selection.from, to: selection.to }, {
+      type: "text", text: label || note.title || T("بدون عنوان", "Untitled"),
+      marks: [{ type: "link", attrs: { href: noteLinkUrl(note.id), target: null } }],
+    }).unsetMark("link").run();
+    setNotePickerOpen(false);
+  };
+
+  const insertMedia = useCallback((media: Pick<UploadedMedia, "url" | "name" | "kind">) => {
+    if (!editor || editor.isDestroyed || readOnly) return;
+    if (media.kind === "image") editor.chain().focus().setImage({ src: media.url, alt: media.name, title: media.name }).run();
+    else {
+      const linkText = media.kind === "audio" || media.kind === "video" ? media.kind : media.name;
+      const link = { type: "text", text: linkText, marks: [{ type: "link", attrs: { href: media.url, target: "_blank", rel: "noopener noreferrer" } }] };
+      const content = media.kind === "audio" || media.kind === "video" ? [link] : [{ type: "text", text: "📎 " }, link];
+      editor.chain().focus().insertContent({ type: "paragraph", content }).run();
+    }
+  }, [editor, readOnly]);
+
+  useImperativeHandle(ref, () => ({
+    getHtml: () => editor?.getHTML() ?? "",
+    getMarkdown: () => editor ? htmlToMarkdown(editor.getHTML()) : "",
+    focus: () => { if (editor && !readOnly) editor.chain().focus().run(); },
+    setMarkdown: (markdown: string) => {
+      if (!editor || editor.isDestroyed || readOnly) return;
+      const current = htmlToMarkdown(editor.getHTML());
+      if (current === markdown) return;
+      editor.commands.setContent(markdownToHtml(markdown), { emitUpdate: false });
+    },
+    insertText: (text: string) => {
+      if (!editor || readOnly || !text.trim()) return;
+      editor.chain().focus().insertContent({ type: "text", text: text.trim() + " " }).run();
+    },
+    insertAttachment: (media: Pick<UploadedMedia, "url" | "name" | "kind">) => { if (editor && !readOnly) insertMedia(media); },
+  }), [editor, readOnly, insertMedia]);
+
+  useEffect(() => {
+    if (!editor || editor.isDestroyed) return;
+    const next = seededContent.current || "";
+    if (next && editor.isEmpty) {
+      try {
+        editor.commands.setContent(next, { emitUpdate: false });
+      } catch {
+        /* editor view not ready yet — content already supplied via `content` option */
+      }
+    }
+  }, [editor]);
+
+  useEffect(() => {
+    if (editor && !editor.isDestroyed && controlledHtml !== undefined && editor.getHTML() !== controlledHtml) editor.commands.setContent(controlledHtml, { emitUpdate: false });
+  }, [editor, controlledHtml]);
+
+  // External replacement (e.g. applying an AI proposal) keyed by revision:
+  // it never remounts and never fires from ordinary keystrokes.
+  useEffect(() => {
+    if (!editor || editor.isDestroyed || externalRevision === undefined) return;
+    if (appliedExternalRevision.current === externalRevision) return;
+    const isFirstRun = appliedExternalRevision.current === undefined;
+    appliedExternalRevision.current = externalRevision;
+    // The first render already seeded the initial content, so only later bumps replace.
+    if (isFirstRun || externalMarkdown === undefined) return;
+    const nextHtml = markdownToHtml(externalMarkdown);
+    if (editor.getHTML() === nextHtml) return;
+    const bookmark = editor.state.selection.getBookmark();
+    editor.commands.setContent(nextHtml, { emitUpdate: false });
+    try { editor.commands.setTextSelection(bookmark.resolve(editor.state.doc)); } catch { /* selection may now be out of range */ }
+  }, [editor, externalMarkdown, externalRevision]);
+
+  useEffect(() => { editor?.setEditable(!readOnly); }, [editor, readOnly]);
+
+  // Detect when toolbar scrolls out of view → show floating "show toolbar" FAB
+  useEffect(() => {
+    const sentinel = sentinelRef.current;
+    if (!sentinel || typeof IntersectionObserver === "undefined") return;
+    const obs = new IntersectionObserver(
+      ([entry]) => setToolbarOnScreen(entry.isIntersecting),
+      { rootMargin: "-1px 0px 0px 0px", threshold: 0 }
+    );
+    obs.observe(sentinel);
+    return () => obs.disconnect();
+  }, []);
+
+  const scrollToToolbar = () => {
+    toolbarRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+  };
+
+  const insertFile = async (file: File) => {
+    if (!user || !editor || readOnly) return toast.error(T("ابتدا وارد حساب شوید", "Sign in first"));
+    const target = attachmentIdentity.current;
+    uploadCount.current++;
+    busyCallback.current?.(true);
+    let position = editor.state.selection.from;
+    const mapPosition = ({ transaction }: { transaction: import("@tiptap/pm/state").Transaction }) => { position = transaction.mapping.map(position, 1); };
+    editor.on("transaction", mapPosition);
+    const tid = toast.loading(T(`در حال بارگذاری ${file.name}…`, `Uploading ${file.name}…`));
+    try {
+      const media = await uploadMediaFull(file, user.id);
+      if (editor.isDestroyed || attachmentIdentity.current !== target) { toast.dismiss(tid); return; }
+      editor.chain().focus().setTextSelection(Math.min(position, editor.state.doc.content.size)).run();
+      insertMedia(media); onUploadedRef.current?.(media);
+      toast.success(T("در متن اضافه شد", "Added to the text"), { id: tid });
+    } catch (error) {
+      if (editor.isDestroyed || attachmentIdentity.current !== target) { toast.dismiss(tid); return; }
+      toast.error(error instanceof Error ? error.message : T("بارگذاری ناموفق بود", "Upload failed"), {
+        id: tid, action: { label: T("تلاش دوباره", "Retry"), onClick: () => {
+          if (!editor.isDestroyed && attachmentIdentity.current === target) void insertFile(file);
+        } },
+      });
+    } finally {
+      editor.off("transaction", mapPosition);
+      uploadCount.current--;
+      if (!editor.isDestroyed && attachmentIdentity.current === target) busyCallback.current?.(uploadCount.current > 0);
+      if (fileRef.current) fileRef.current.value = "";
+    }
+  };
+  insertFileRef.current = insertFile;
+
+  const onPickFile = (kind: "image" | "audio" | "video" | "file") => {
+    setPendingKind(kind);
+    if (!fileRef.current) return;
+    const accept = kind === "image" ? "image/*" : kind === "audio" ? "audio/*" : kind === "video" ? "video/*" : "*/*";
+    fileRef.current.accept = accept;
+    fileRef.current.value = "";
+    fileRef.current.click();
+  };
+
+  const [linkOpen, setLinkOpen] = useState(false);
+  const [linkSelection, setLinkSelection] = useState("");
+  const addLink = () => {
+    if (!editor) return;
+    const { from, to } = editor.state.selection;
+    linkBookmark.current = editor.state.selection.getBookmark();
+    setLinkSelection(editor.state.doc.textBetween(from, to, " "));
+    setLinkOpen(true);
+  };
+  const submitLink = (url: string, text: string) => {
+    if (!editor || editor.isDestroyed || readOnly) return;
+    if (linkBookmark.current) {
+      editor.commands.setTextSelection(linkBookmark.current.resolve(editor.state.doc));
+      linkBookmark.current = null;
+    }
+    if (editor.state.selection.empty) {
+      editor.chain().focus().insertContent({ type: "text", text: text || url, marks: [{ type: "link", attrs: { href: url } }] }).run();
+    } else {
+      editor.chain().focus().setLink({ href: url }).run();
+    }
+  };
+
+  const runAI = async (action: string) => {
+    if (!editor || readOnly) return;
+    const target = attachmentIdentity.current;
+    let bookmark = editor.state.selection.getBookmark();
+    const mapSelection = ({ transaction }: { transaction: import("@tiptap/pm/state").Transaction }) => { bookmark = bookmark.map(transaction.mapping); };
+    const { from, to } = editor.state.selection;
+    const selected = editor.state.doc.textBetween(from, to, "\n");
+    if (!selected.trim()) return toast.error(T("اول متنی را انتخاب کن", "Select some text first"));
+    setAiBusy(true);
+    editor.on("transaction", mapSelection);
+    try {
+      const r = await callAI("inline_edit", selected, undefined, action, getAILanguage());
+      const newText = (r.text || "").trim();
+      if (editor.isDestroyed || attachmentIdentity.current !== target) return;
+      const selection = bookmark.resolve(editor.state.doc);
+      if (editor.state.doc.textBetween(selection.from, selection.to, "\n") !== selected) throw new Error(T("متن انتخاب‌شده تغییر کرده؛ دوباره انتخاب کنید", "Selected text changed; please select it again"));
+      if (!newText) throw new Error(T("نتیجه خالی بود", "Empty result"));
+      editor.chain().focus().deleteRange({ from: selection.from, to: selection.to }).insertContent(markdownToHtml(newText)).run();
+      toast.success(T("اعمال شد", "Applied"));
+    } catch (e: any) {
+      if (!editor.isDestroyed && attachmentIdentity.current === target) toast.error(e.message);
+    } finally {
+      editor.off("transaction", mapSelection);
+      if (!editor.isDestroyed && attachmentIdentity.current === target) setAiBusy(false);
+    }
+  };
+
+  if (!editor) return <div className={`${compact ? compactExpanded ? "min-h-[260px]" : "min-h-[72px]" : "min-h-[50vh]"} animate-pulse rounded bg-muted/30`} />;
+
+  return (
+    <div
+      className={`${compact ? "bg-transparent overflow-visible" : "bg-background overflow-hidden"} relative w-full rich-editor-surface`}
+      data-rich-selection
+    >
+      <input
+        ref={fileRef} type="file" className="hidden" aria-label={T("انتخاب پیوست برای درج در متن", "Choose an attachment to insert in the text")}
+        onChange={(e) => {
+          const f = e.target.files?.[0];
+          if (f) insertFile(f);
+        }}
+      />
+
+      <div ref={sentinelRef} aria-hidden className="h-px" />
+
+      {!readOnly && showToolbar && <div ref={toolbarRef} data-testid="rich-editor-toolbar" role="toolbar" aria-label={T("قالب‌بندی متن", "Text formatting")} onMouseDown={event => event.preventDefault()} className="flex items-center gap-0.5 border-b p-1 sticky top-0 bg-background z-10 overflow-x-auto">
+        <Button size="sm" variant="ghost" className="h-8 px-2 shrink-0" aria-label="Undo" onClick={() => editor.chain().focus().undo().run()}><Undo2 className="w-4 h-4" /></Button>
+        <Button size="sm" variant="ghost" className="h-8 px-2 shrink-0" aria-label="Redo" onClick={() => editor.chain().focus().redo().run()}><Redo2 className="w-4 h-4" /></Button>
+        {noteLinks && <Button type="button" size="sm" variant="ghost" className="h-11 px-2 shrink-0" onClick={openNotePicker} aria-label={T("پیوند به یادداشت", "Link to note")}><LinkIcon className="w-4 h-4" /><span className="ms-1 text-xs">{T("یادداشت", "Note")}</span></Button>}
+        {noteLinks && noteLinkId(editor.getAttributes("link").href) && <Button type="button" size="sm" variant="ghost" className="h-11 shrink-0" onClick={() => noteLinks.onOpen(noteLinkId(editor.getAttributes("link").href)!)}>{T("بازکردن یادداشت", "Open note")}</Button>}
+        {([ ["bold", Bold], ["italic", Italic], ["underline", UnderlineIcon] ] as const).map(([mark, Icon]) => <Toggle key={mark} size="sm" className="shrink-0 h-8 w-8 px-0" data-mark={mark} aria-label={mark === "bold" ? T("پررنگ", "Bold") : mark === "italic" ? T("مورب", "Italic") : mark === "underline" ? T("زیرخط", "Underline") : T("هایلایت", "Highlight")} pressed={editor.isActive(mark)} onPressedChange={() => editor.chain().focus().toggleMark(mark).run()}><Icon className="w-4 h-4" /></Toggle>)}
+        <DropdownMenu><DropdownMenuTrigger asChild><Button size="sm" variant="ghost" className="h-8 px-2 shrink-0" aria-label={T("قالب‌بندی بیشتر", "More formatting")} data-testid="editor-more-tools"><Wrench className="w-4 h-4" /></Button></DropdownMenuTrigger>
+          <DropdownMenuContent onCloseAutoFocus={event => event.preventDefault()} align="end" className="max-h-[60dvh] overflow-y-auto">
+            {[1, 2, 3].map(level => <DropdownMenuItem key={level} onClick={() => editor.chain().focus().toggleHeading({ level: level as 1 | 2 | 3 }).run()}>{T("عنوان", "Heading")} {level}</DropdownMenuItem>)}
+            <DropdownMenuItem onClick={() => editor.chain().focus().setParagraph().run()}>{T("متن معمولی", "Paragraph")}</DropdownMenuItem>
+            <DropdownMenuItem onClick={() => editor.chain().focus().toggleStrike().run()}>{T("خط‌خورده", "Strikethrough")}</DropdownMenuItem>
+            <DropdownMenuItem onClick={() => editor.chain().focus().toggleHighlight().run()}>{T("هایلایت", "Highlight")}</DropdownMenuItem>
+            <DropdownMenuItem onClick={() => editor.chain().focus().toggleBulletList().run()}>{T("فهرست", "Bullet list")}</DropdownMenuItem>
+            <DropdownMenuItem onClick={() => editor.chain().focus().toggleOrderedList().run()}>{T("فهرست شماره‌دار", "Numbered list")}</DropdownMenuItem>
+            <DropdownMenuItem onClick={() => editor.chain().focus().toggleTaskList().run()}>{T("چک‌لیست", "Checklist")}</DropdownMenuItem>
+            <DropdownMenuItem onClick={() => editor.chain().focus().toggleBlockquote().run()}>{T("نقل‌قول", "Quote")}</DropdownMenuItem>
+            <DropdownMenuItem onClick={() => editor.chain().focus().toggleCodeBlock().run()}>{T("بلوک کد", "Code block")}</DropdownMenuItem>
+            {(["right", "center", "left"] as const).map(align => <DropdownMenuItem key={align} onClick={() => editor.chain().focus().setTextAlign(align).run()}>{align === "right" ? T("راست‌چین", "Align right") : align === "left" ? T("چپ‌چین", "Align left") : T("وسط‌چین", "Align center")}</DropdownMenuItem>)}
+          </DropdownMenuContent>
+        </DropdownMenu>
+        <DropdownMenu><DropdownMenuTrigger asChild><Button size="sm" variant="ghost" className="h-8 px-2 shrink-0" aria-label={T("درج پیوست", "Insert attachment")}><Paperclip className="w-4 h-4" /></Button></DropdownMenuTrigger>
+          <DropdownMenuContent onCloseAutoFocus={event => event.preventDefault()} align="end">
+            {(["image", "audio", "video", "file"] as const).map(kind => <DropdownMenuItem key={kind} onClick={() => onPickFile(kind)}>{kind === "image" ? T("تصویر", "Image") : kind === "audio" ? T("صدا", "Audio") : kind === "video" ? T("ویدیو", "Video") : T("فایل", "File")}</DropdownMenuItem>)}
+            <DropdownMenuItem onClick={addLink}>{T("لینک", "Link")}</DropdownMenuItem>
+            <DropdownMenuItem onClick={() => editor.chain().focus().setHorizontalRule().run()}>{T("خط افقی", "Divider")}</DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
+        {showVoiceButton && <VoiceInputButton continuous onListeningChange={listening => { if (listening) voiceBookmark.current = editor.state.selection.getBookmark(); }} onTranscript={text => {
+          if (editor.isDestroyed || readOnly) return;
+          if (voiceBookmark.current) editor.commands.setTextSelection(voiceBookmark.current.resolve(editor.state.doc));
+          editor.chain().focus().insertContent({ type: "text", text: text.trim() + " " }).run();
+          voiceBookmark.current = editor.state.selection.getBookmark();
+        }} size="sm" className="h-8 px-2 shrink-0" />}
+      </div>}
+
+      {!readOnly && <BubbleMenu editor={editor} updateDelay={100} className="z-20">
+        <div role="toolbar" aria-label={T("قالب‌بندی انتخاب", "Selection formatting")} className="flex items-center gap-0.5 rounded-md border bg-popover p-1 shadow-md" onMouseDown={event => event.preventDefault()}>
+          {([ ["bold", Bold], ["italic", Italic], ["underline", UnderlineIcon], ["highlight", Highlighter] ] as const).map(([mark, Icon]) => <Toggle key={mark} size="sm" className="h-8 w-8 px-0" data-mark={mark} aria-label={mark === "bold" ? T("پررنگ", "Bold") : mark === "italic" ? T("مورب", "Italic") : mark === "underline" ? T("زیرخط", "Underline") : T("هایلایت", "Highlight")} pressed={editor.isActive(mark)} onPressedChange={() => editor.chain().focus().toggleMark(mark).run()}><Icon className="w-4 h-4" /></Toggle>)}
+          <Button size="sm" variant="ghost" className="h-8 w-8 p-0" aria-label={T("لینک", "Link")} onClick={addLink}><LinkIcon className="w-4 h-4" /></Button>
+          <DropdownMenu><DropdownMenuTrigger asChild><Button size="sm" variant="ghost" className="h-8 px-2" disabled={aiBusy} aria-label="AI">{aiBusy ? <Loader2 className="w-4 h-4 animate-spin" /> : <Sparkles className="w-4 h-4" />}</Button></DropdownMenuTrigger>
+            <DropdownMenuContent onCloseAutoFocus={event => event.preventDefault()} align="start" className="max-h-80 overflow-y-auto">{AI_ACTIONS.map(action => <DropdownMenuItem key={action.key} onClick={() => runAI(action.key)}>{action.label}</DropdownMenuItem>)}</DropdownMenuContent>
+          </DropdownMenu>
+        </div>
+      </BubbleMenu>}
+
+      <div className="px-1 py-2">
+        <EditorContent editor={editor} />
+      </div>
+      <LinkDialog open={linkOpen} onOpenChange={setLinkOpen} initialText={linkSelection} askText={!linkSelection} onSubmit={submitLink} />
+      {noteLinks && notePickerOpen && <NoteLinkPicker key={noteLinks.ownerId} scope={noteLinks} sourceId={attachmentScopeId} onPick={insertNoteLink} onClose={closeNotePicker} />}
+
+      {/* Floating "show toolbar" FAB when toolbar is scrolled out */}
+      {!readOnly && showToolbar && !toolbarOnScreen && (
+        <button
+          type="button"
+          onClick={scrollToToolbar}
+          className="fixed bottom-20 start-4 z-40 h-11 w-11 rounded-full shadow-elegant bg-primary text-primary-foreground flex items-center justify-center hover:scale-105 transition"
+          title={T("نمایش نوار ابزار", "Show toolbar")}
+          aria-label={T("نمایش نوار ابزار", "Show toolbar")}
+        >
+          <Wrench className="w-5 h-5" />
+        </button>
+      )}
+    </div>
+  );
+});

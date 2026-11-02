@@ -1,0 +1,711 @@
+import { TaskPlanningPicker } from "./TaskPlanningPicker";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { cacheGet } from "@/lib/offlineQueue";
+import { extractTasksFromCache } from "@/features/tasks/taskCache";
+import { useAuth } from "@/hooks/useAuth";
+import { Card } from "@/components/ui/card";
+import { Button } from "@/components/ui/button";
+import { AutoTextarea } from "@/components/ui/auto-textarea";
+import { Checkbox } from "@/components/ui/checkbox";
+import {
+  AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription,
+  AlertDialogFooter, AlertDialogHeader, AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
+import { Plus, Trash2, ListTree, GripVertical, ChevronLeft, ChevronRight, Eye, EyeOff } from "lucide-react";
+import { toast } from "sonner";
+import { useBilingual } from "@/hooks/useBilingual";
+import { useShowCompletedTasks, setShowCompletedTasks } from "@/lib/completedTaskVisibility";
+import { toPersianDigits } from "@/lib/jalali";
+import { BidiText } from "@/components/BidiText";
+import { persistTask } from "@/lib/firestoreDataService";
+import {
+  deleteTaskCascade,
+  getServerConfirmedCascadeTasks,
+} from "@/features/tasks/taskService";
+import { buildTaskChildrenMap, collectTaskDescendantIds } from "@/features/tasks/taskTree";
+import type { Task } from "@/lib/taskTypes";
+import {
+  DndContext, closestCenter, PointerSensor, useSensor, useSensors,
+  type DragEndEvent,
+} from "@dnd-kit/core";
+import {
+  SortableContext, verticalListSortingStrategy, arrayMove, useSortable,
+} from "@dnd-kit/sortable";
+import { CSS } from "@dnd-kit/utilities";
+
+import { awardTaskWatering } from "@/lib/garden";
+import { playCompletionFeedback } from "@/lib/completionFeedback";
+
+type Sub = Partial<Task> & {
+  id: string; title: string; completed: boolean; position: number;
+};
+
+export function TaskSubtasksInline({
+  taskId, ...props
+}: {
+  taskId: string;
+  onOpenSubtask?: (id: string) => void;
+  onProgressChange?: (completed: number, total: number) => void;
+  onSubtasksChange?: (subs: Sub[]) => void;
+  readOnly?: boolean;
+  initialSubs?: Sub[];
+}) {
+  const { user } = useAuth();
+  return <TaskSubtasksContent key={`${user?.id || "guest"}\u0000${taskId}`} taskId={taskId} {...props} />;
+}
+
+function TaskSubtasksContent({
+  taskId, onOpenSubtask, onProgressChange, onSubtasksChange, readOnly = false, initialSubs,
+}: {
+  taskId: string;
+  onOpenSubtask?: (id: string) => void;
+  onProgressChange?: (completed: number, total: number) => void;
+  onSubtasksChange?: (subs: Sub[]) => void;
+  readOnly?: boolean;
+  initialSubs?: Sub[];
+}) {
+  const { user } = useAuth();
+  const { T, isEn } = useBilingual();
+  const showCompletedTasks = useShowCompletedTasks();
+  const [subs, setSubs] = useState<Sub[]>(initialSubs || []);
+  const currentRows = useRef(subs);
+  currentRows.current = subs;
+  const [newTitle, setNewTitle] = useState("");
+  const [adding, setAdding] = useState(false);
+  const [deleteCandidate, setDeleteCandidate] = useState<Sub | null>(null);
+  const [deleteWarning, setDeleteWarning] = useState<"nested" | "unverified">("nested");
+  const [deleting, setDeleting] = useState(false);
+  const addInFlight = useRef(false);
+  const creationDraft = useRef<Task | null>(null);
+  const writes = useRef(new Map<string, Promise<unknown>>());
+  const toggleVersions = useRef(new Map<string, number>());
+  const togglePending = useRef(new Map<string, number>());
+  const confirmedToggles = useRef(new Map<string, Pick<Sub, "completed" | "status">>());
+  const planningVersions = useRef(new Map<string, number>());
+  const planningPending = useRef(new Map<string, number>());
+  const confirmedPlanning = useRef(new Map<string, unknown>());
+  const reorderInFlight = useRef(false);
+  const removingIds = useRef(new Set<string>());
+  const scopeKey = `${user?.id || "guest"}\u0000${taskId}`;
+  const activeScope = useRef(scopeKey);
+  activeScope.current = scopeKey;
+  useEffect(() => {
+    activeScope.current = scopeKey;
+    return () => { activeScope.current = ""; };
+  }, [scopeKey]);
+  const loadGeneration = useRef(0);
+  const composition = useRef(false);
+  const draftTitle = useRef(newTitle);
+  draftTitle.current = newTitle;
+
+  const editingRef = useRef<Set<string>>(new Set());
+  const pendingTitles = useRef<Record<string, string>>({});
+  const writeTimers = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
+  // Guard against stale background Firestore snapshots or un-synced parent initialSubs reverting checks
+  const recentTogglesRef = useRef<Map<string, { completed: boolean; time: number }>>(new Map());
+  const recentAddsRef = useRef<Map<string, { row: Sub; time: number }>>(new Map());
+  useEffect(() => {
+    const beforeUnload = (event: BeforeUnloadEvent) => {
+      if (!draftTitle.current.trim() && !Object.keys(pendingTitles.current).length && !writes.current.size) return;
+      event.preventDefault();
+      event.returnValue = "";
+    };
+    window.addEventListener("beforeunload", beforeUnload);
+    return () => window.removeEventListener("beforeunload", beforeUnload);
+  }, []);
+  // Serialize writes to each row, including debounce/blur/exit title flushes.
+  const write = useCallback((id: string, patch: Partial<Task>) => {
+    const previous = writes.current.get(id);
+    const persist = () => persistTask(user!.id, { id, ...patch });
+    const next = previous ? previous.catch(() => {}).then(persist) : persist();
+    writes.current.set(id, next);
+    void next.finally(() => {
+      if (writes.current.get(id) === next) writes.current.delete(id);
+    }).catch(() => {});
+    return next;
+  }, [user?.id]);
+  const withRecentAdds = (rows: Sub[]) => {
+    const ids = new Set(rows.map(row => row.id));
+    const result = [...rows];
+    for (const [id, entry] of recentAddsRef.current) {
+      if (Date.now() - entry.time >= 15000) recentAddsRef.current.delete(id);
+      else if (!ids.has(id)) result.push(currentRows.current.find(row => row.id === id) || entry.row);
+    }
+    return result;
+  };
+
+  const flushPendingTitle = useCallback(async (id: string) => {
+    if (removingIds.current.has(id)) return;
+    if (writeTimers.current[id]) {
+      clearTimeout(writeTimers.current[id]);
+      delete writeTimers.current[id];
+    }
+    const title = pendingTitles.current[id];
+    if (title !== undefined && user) {
+      const status = await write(id, { title }).catch(() => "failed" as const);
+      if (activeScope.current !== scopeKey) return;
+      if (status === "failed") {
+        toast.error(T("خطا در ذخیره عنوان زیرتسک", "Failed to save subtask title"));
+        return;
+      }
+      if (pendingTitles.current[id] === title) {
+        delete pendingTitles.current[id];
+        editingRef.current.delete(id);
+      }
+      window.dispatchEvent(new Event("tasks-changed"));
+    }
+  }, [user?.id, taskId, write]);
+
+  useEffect(() => {
+    setSubs(initialSubs || []);
+    setNewTitle("");
+    setAdding(false);
+    addInFlight.current = false;
+    composition.current = false;
+    editingRef.current.clear();
+    pendingTitles.current = {};
+    writeTimers.current = {};
+    recentTogglesRef.current.clear();
+    recentAddsRef.current.clear();
+    loadGeneration.current += 1;
+  }, [scopeKey]);
+
+  useEffect(() => {
+    return () => {
+      // Flush any debounced title writes on unmount so changes are never lost
+      Object.keys(pendingTitles.current).forEach((id) => {
+        const title = pendingTitles.current[id];
+        if (title !== undefined && user && !removingIds.current.has(id)) {
+          void write(id, { title }).catch(() => {});
+        }
+      });
+      Object.values(writeTimers.current).forEach(clearTimeout);
+    };
+  }, [user?.id, taskId, write]);
+
+  useEffect(() => {
+    if (initialSubs) {
+      setSubs((prev) => {
+        if (prev.length === 0) return withRecentAdds(initialSubs);
+        const prevMap = new Map(prev.map((p) => [p.id, p]));
+        const merged = initialSubs.map((row) => {
+          let title = row.title;
+          let completed = row.completed;
+          if (editingRef.current.has(row.id) && prevMap.has(row.id)) {
+            title = prevMap.get(row.id)!.title;
+          }
+          const recentToggle = recentTogglesRef.current.get(row.id);
+          if (recentToggle && Date.now() - recentToggle.time < 15000) {
+            completed = recentToggle.completed;
+          }
+          return { ...row, title, completed };
+        });
+        return withRecentAdds(merged);
+      });
+    }
+  }, [initialSubs]);
+
+  const replaceRows = useCallback((rows: Sub[]) => {
+    // Preserve titles for rows actively edited, and preserve recently toggled completed state
+    setSubs((prev) => {
+      const prevMap = new Map(prev.map((p) => [p.id, p]));
+      const merged = rows.map((row) => {
+        let title = row.title;
+        let completed = row.completed;
+        if (editingRef.current.has(row.id) && prevMap.has(row.id)) {
+          title = prevMap.get(row.id)!.title;
+        }
+        const recentToggle = recentTogglesRef.current.get(row.id);
+        if (recentToggle && Date.now() - recentToggle.time < 15000) {
+          completed = recentToggle.completed;
+        }
+        return { ...row, title, completed };
+      });
+      return withRecentAdds(merged);
+    });
+  }, []);
+
+  const load = useCallback(async () => {
+    if (!user) return;
+    const generation = ++loadGeneration.current;
+    const cachedRaw = await cacheGet<unknown>(`tasks:all:${user.id}`);
+    if (activeScope.current !== scopeKey || generation !== loadGeneration.current) return;
+    if (cachedRaw == null) return;
+    const cached = extractTasksFromCache(cachedRaw);
+    if (cached) {
+      const childRows = cached
+        .filter((row) => row && row.parent_id === taskId)
+        .sort((a, b) => ((a as any).position ?? 0) - ((b as any).position ?? 0))
+        .map((row, i) => ({
+          ...row,
+          id: row.id,
+          title: row.title,
+          completed: Boolean(row.completed),
+          position: (row as any).position ?? i,
+        }));
+      replaceRows(childRows);
+    }
+  }, [taskId, user?.id, replaceRows, scopeKey]);
+
+  useEffect(() => { load(); }, [load]);
+
+  useEffect(() => {
+    if (!user) return;
+    const onTasksChanged = () => void load();
+    window.addEventListener("tasks-changed", onTasksChanged);
+    return () => {
+      window.removeEventListener("tasks-changed", onTasksChanged);
+    };
+  }, [user?.id, load]);
+
+  const add = async () => {
+    if (readOnly || addInFlight.current) return;
+    const title = newTitle.trim();
+    if (!title || !user) return;
+    const submittedValue = newTitle;
+    const submittedScope = scopeKey;
+    addInFlight.current = true;
+    setAdding(true);
+
+    let position = subs.reduce((max, row) => Math.max(max, row.position ?? 0), -1) + 1;
+    const newSubTask: Task = creationDraft.current?.title === title ? creationDraft.current : {
+      id: crypto.randomUUID(),
+      user_id: user.id,
+      title,
+      parent_id: taskId,
+      priority: "none",
+      position,
+      completed: false,
+      status: "todo",
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    };
+    creationDraft.current = newSubTask;
+    position = newSubTask.position ?? position;
+    const newId = newSubTask.id;
+
+    try {
+      const status = await persistTask(user.id, newSubTask);
+      if (activeScope.current !== submittedScope) return;
+      if (status === "failed") {
+        toast.error(T("خطا در ایجاد زیرتسک", "Failed to create subtask"));
+        return;
+      }
+      creationDraft.current = null;
+      loadGeneration.current += 1;
+      recentAddsRef.current.set(newId, { row: { ...newSubTask, position }, time: Date.now() });
+      const nextSubs = currentRows.current.some(row => row.id === newId) ? currentRows.current : [...currentRows.current, { ...newSubTask, position }];
+      setSubs(nextSubs);
+      onSubtasksChange?.(nextSubs);
+      setNewTitle(current => current === submittedValue ? "" : current);
+      window.dispatchEvent(new Event("tasks-changed"));
+    } catch {
+      if (activeScope.current === submittedScope) toast.error(T("خطا در ایجاد زیرتسک", "Failed to create subtask"));
+    } finally {
+      if (activeScope.current === submittedScope) {
+        addInFlight.current = false;
+        setAdding(false);
+      }
+    }
+  };
+
+  const toggle = async (s: Sub) => {
+    if (readOnly || !user) return;
+    const next = !s.completed;
+    const pending = togglePending.current.get(s.id) || 0;
+    if (!pending) confirmedToggles.current.set(s.id, { completed: s.completed, status: s.status });
+    togglePending.current.set(s.id, pending + 1);
+    const version = (toggleVersions.current.get(s.id) || 0) + 1;
+    toggleVersions.current.set(s.id, version);
+    const nextSubs = subs.map((x) => (x.id === s.id ? { ...x, completed: next, status: next ? "done" as const : "todo" as const } : x));
+    setSubs(nextSubs);
+    onSubtasksChange?.(nextSubs);
+
+    recentTogglesRef.current.set(s.id, { completed: next, time: Date.now() });
+
+    // Award watering and drops to garden when checking subtask
+    if (next) {
+      playCompletionFeedback();
+      awardTaskWatering(s.title, true);
+    }
+
+    const status = await write(s.id, {
+      id: s.id,
+      completed: next,
+      status: next ? "done" : "todo",
+      parent_id: taskId,
+      completed_at: next ? new Date().toISOString() : null,
+    }).catch(() => "failed" as const);
+    if (activeScope.current !== scopeKey) return;
+    togglePending.current.set(s.id, (togglePending.current.get(s.id) || 1) - 1);
+    if (status !== "failed") confirmedToggles.current.set(s.id, { completed: next, status: next ? "done" : "todo" });
+    if (toggleVersions.current.get(s.id) !== version) return;
+    if (status === "failed") {
+      recentTogglesRef.current.delete(s.id);
+      const restored = currentRows.current.map(row => row.id === s.id ? { ...row, ...confirmedToggles.current.get(s.id) } : row);
+      setSubs(restored);
+      onSubtasksChange?.(restored);
+      toast.error(T("خطا در به‌روزرسانی زیرتسک", "Failed to update subtask"));
+      return;
+    }
+    window.dispatchEvent(new Event("tasks-changed"));
+  };
+
+  const patchPlanning = async (sub: Sub, patch: Partial<Task>) => {
+    if (!user || readOnly) return;
+    const versions = Object.keys(patch).map(key => {
+      const field = `${sub.id}\u0000${key}`;
+      const pending = planningPending.current.get(field) || 0;
+      if (!pending) confirmedPlanning.current.set(field, sub[key as keyof Sub]);
+      planningPending.current.set(field, pending + 1);
+      const version = (planningVersions.current.get(field) || 0) + 1;
+      planningVersions.current.set(field, version);
+      return { key, field, version };
+    });
+    setSubs(previous => previous.map(row => row.id === sub.id ? { ...row, ...patch } : row));
+    const status = await write(sub.id, patch).catch(() => "failed" as const);
+    if (activeScope.current !== scopeKey) return;
+    for (const { key, field } of versions) {
+      planningPending.current.set(field, (planningPending.current.get(field) || 1) - 1);
+      if (status !== "failed") confirmedPlanning.current.set(field, patch[key as keyof Task]);
+    }
+    if (status === "failed") {
+      const rollback = Object.fromEntries(versions.filter(({ field, version }) => planningVersions.current.get(field) === version).map(({ key, field }) => [key, confirmedPlanning.current.get(field)]));
+      setSubs(previous => previous.map(row => row.id === sub.id ? { ...row, ...rollback } : row));
+      toast.error(T("برنامه‌ریزی ذخیره نشد", "Could not save planning"));
+    }
+    window.dispatchEvent(new Event("tasks-changed"));
+  };
+
+  const updateTitle = (id: string, title: string) => {
+    if (readOnly || !user) return;
+    editingRef.current.add(id);
+    pendingTitles.current[id] = title;
+    setSubs((prev) => prev.map((x) => (x.id === id ? { ...x, title } : x)));
+
+    if (writeTimers.current[id]) clearTimeout(writeTimers.current[id]);
+    writeTimers.current[id] = setTimeout(() => { void flushPendingTitle(id); }, 500);
+  };
+
+  const remove = async (id: string) => {
+    if (readOnly || !user || removingIds.current.has(id)) return false;
+    removingIds.current.add(id);
+    const prevSubs = subs;
+    recentAddsRef.current.delete(id);
+    const nextSubs = subs.filter((x) => x.id !== id);
+    setSubs(nextSubs);
+    onSubtasksChange?.(nextSubs);
+
+    if (writeTimers.current[id]) clearTimeout(writeTimers.current[id]);
+    delete writeTimers.current[id];
+    await writes.current.get(id)?.catch(() => {});
+    if (activeScope.current !== scopeKey) return false;
+    const res = await deleteTaskCascade(user.id, id).catch(() => ({ success: false }));
+    if (activeScope.current !== scopeKey) return false;
+    if (!res.success) {
+      removingIds.current.delete(id);
+      const removed = prevSubs.find(row => row.id === id);
+      const restored = removed && !currentRows.current.some(row => row.id === id) ? [...currentRows.current, removed].sort((a, b) => a.position - b.position) : currentRows.current;
+      setSubs(restored);
+      onSubtasksChange?.(restored);
+      if (pendingTitles.current[id] !== undefined) void flushPendingTitle(id);
+      toast.error(T("خطا در حذف زیرتسک", "Failed to delete subtask"));
+      return false;
+    }
+    delete pendingTitles.current[id];
+    window.dispatchEvent(new Event("tasks-changed"));
+    return true;
+  };
+
+  const requestRemove = async (sub: Sub) => {
+    if (readOnly || !user) return;
+    try {
+      const isOffline = typeof navigator !== "undefined" && !navigator.onLine;
+      let candidateTasks: Task[];
+      if (isOffline) {
+        candidateTasks = extractTasksFromCache(await cacheGet<unknown>(`tasks:all:${user.id}`));
+        if (activeScope.current !== scopeKey) return;
+      } else {
+        const serverTasks = await getServerConfirmedCascadeTasks(user.id);
+        if (activeScope.current !== scopeKey) return;
+        if (!serverTasks) {
+          // A failed/cache-only preflight cannot prove this is a leaf.
+          setDeleteWarning("unverified");
+          setDeleteCandidate(sub);
+          return;
+        }
+        candidateTasks = serverTasks;
+      }
+      const descendants = collectTaskDescendantIds(sub.id, buildTaskChildrenMap(candidateTasks));
+      if (descendants.some((id) => id !== sub.id)) {
+        setDeleteWarning("nested");
+        setDeleteCandidate(sub);
+        return;
+      }
+      if (isOffline) {
+        // Even a fresh local cache cannot rule out a child created by another device.
+        setDeleteWarning("unverified");
+        setDeleteCandidate(sub);
+        return;
+      }
+    } catch {
+      if (activeScope.current !== scopeKey) return;
+      // If descendants cannot be checked, show the broader warning before a cascade.
+      setDeleteWarning("unverified");
+      setDeleteCandidate(sub);
+      return;
+    }
+    await remove(sub.id);
+  };
+
+  const confirmRemove = async () => {
+    if (!deleteCandidate || deleting) return;
+    setDeleting(true);
+    const removed = await remove(deleteCandidate.id);
+    if (activeScope.current !== scopeKey) return;
+    setDeleting(false);
+    if (removed) {
+      setDeleteCandidate(null);
+      setDeleteWarning("nested");
+    }
+  };
+
+  const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 5 } }));
+
+  const reorder = async (fromId: string, toId: string) => {
+    if (readOnly || !user || reorderInFlight.current) return;
+    const fromIdx = subs.findIndex((s) => s.id === fromId);
+    const toIdx = subs.findIndex((s) => s.id === toId);
+    if (fromIdx < 0 || toIdx < 0 || fromIdx === toIdx) return;
+    reorderInFlight.current = true;
+    const prevSubs = subs;
+    const reordered = arrayMove(subs, fromIdx, toIdx).map((s, i) => ({ ...s, position: i }));
+    setSubs(reordered);
+
+    const results = await Promise.all(
+      reordered.map((s, i) => write(s.id, { position: i }).catch(() => "failed" as const))
+    );
+    if (activeScope.current !== scopeKey) return;
+    reorderInFlight.current = false;
+    if (results.some((r) => r === "failed")) {
+      const positions = new Map(prevSubs.map(row => [row.id, row.position]));
+      setSubs(previous => previous.map(row => ({ ...row, position: positions.get(row.id) ?? row.position })).sort((a, b) => a.position - b.position));
+      toast.error(T("خطا در تغییر ترتیب زیرتسک‌ها", "Failed to reorder subtasks"));
+      return;
+    }
+    window.dispatchEvent(new Event("tasks-changed"));
+  };
+
+  const done = subs.filter((s) => s.completed).length;
+  const visibleSubs = showCompletedTasks ? subs : subs.filter((subtask) => !subtask.completed);
+  const num = (n: number) => (isEn ? String(n) : toPersianDigits(n));
+
+  useEffect(() => { onProgressChange?.(done, subs.length); }, [done, subs.length, onProgressChange]);
+
+  return (
+    <div className="space-y-2">
+      {subs.length > 0 && done > 0 && (
+        <div className="flex items-center justify-between text-xs px-0.5 pb-0.5">
+          <span className="text-[11px] text-muted-foreground tabular-nums">
+            {T(`${num(done)} از ${num(subs.length)} زیرتسک انجام شده`, `${num(done)} of ${num(subs.length)} subtasks completed`)}
+          </span>
+          <button
+            type="button"
+            onClick={() => setShowCompletedTasks(!showCompletedTasks)}
+            className="inline-flex items-center gap-1 text-[11px] text-muted-foreground hover:text-foreground hover:bg-muted/70 px-2 py-0.5 rounded-lg transition-colors cursor-pointer"
+            title={showCompletedTasks ? T("مخفی‌سازی زیرتسک‌های انجام‌شده", "Hide completed subtasks") : T("نمایش زیرتسک‌های انجام‌شده", "Show completed subtasks")}
+            data-testid="toggle-completed-subtasks"
+          >
+            {showCompletedTasks ? <EyeOff className="w-3 h-3 text-primary" /> : <Eye className="w-3 h-3" />}
+            <span>
+              {showCompletedTasks
+                ? T("مخفی‌سازی انجام‌شده‌ها", "Hide completed")
+                : T(`نمایش انجام‌شده‌ها (${num(done)})`, `Show completed (${num(done)})`)}
+            </span>
+          </button>
+        </div>
+      )}
+      <DndContext
+        sensors={sensors}
+        collisionDetection={closestCenter}
+        onDragEnd={(e: DragEndEvent) => {
+          const { active, over } = e;
+          if (!over || active.id === over.id) return;
+          reorder(String(active.id), String(over.id));
+        }}
+      >
+        <SortableContext items={visibleSubs.map((s) => s.id)} strategy={verticalListSortingStrategy}>
+          <ul className="space-y-1">
+            {visibleSubs.map((s) => (
+              <SortableSubtaskRow
+                key={s.id}
+                sub={s}
+                readOnly={readOnly}
+                onToggle={() => toggle(s)}
+                onPatch={patch => void patchPlanning(s, patch)}
+                onChangeTitle={(title) => updateTitle(s.id, title)}
+                onBlur={() => void flushPendingTitle(s.id)}
+                onOpen={onOpenSubtask ? () => onOpenSubtask(s.id) : undefined}
+                onDelete={() => { void requestRemove(s); }}
+                isEn={isEn}
+                T={T}
+              />
+            ))}
+            {visibleSubs.length === 0 && (
+              <li className="text-xs text-muted-foreground/70 px-1 py-1">
+                {subs.length > 0 && done > 0 ? (
+                  <button
+                    type="button"
+                    onClick={() => setShowCompletedTasks(true)}
+                    className="inline-flex items-center gap-1.5 text-primary hover:underline cursor-pointer font-medium"
+                    data-testid="show-hidden-completed-subtasks"
+                  >
+                    <Eye className="w-3.5 h-3.5" />
+                    <span>{T(`${num(done)} زیرتسک انجام‌شده مخفی است — برای مشاهده کلیک کنید`, `${num(done)} completed subtask(s) hidden — click to show`)}</span>
+                  </button>
+                ) : (
+                  <span>— {T("زیرتسکی نیست", "No subtasks")} —</span>
+                )}
+              </li>
+            )}
+          </ul>
+        </SortableContext>
+      </DndContext>
+
+      <div className="flex items-center gap-2">
+        <AutoTextarea
+          value={newTitle}
+          onChange={(e) => setNewTitle(e.target.value)}
+          onCompositionStart={() => { composition.current = true; }}
+          onCompositionEnd={() => { composition.current = false; }}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" && !e.shiftKey && !composition.current && !e.nativeEvent.isComposing && e.keyCode !== 229) {
+              e.preventDefault();
+              add();
+            }
+          }}
+          disabled={readOnly}
+          placeholder={readOnly ? "" : `+ ${T("زیرتسک جدید...", "New subtask...")}`}
+          className="text-xs flex-1 min-h-[28px] max-h-[120px] py-1.5"
+          dir="auto"
+          rows={1}
+          minHeight={28}
+          maxHeight={120}
+        />
+        <Button size="icon" variant="ghost" onClick={add} disabled={readOnly || adding} className="h-7 w-7" aria-label={T("افزودن زیرکار", "Add subtask")}>
+          <Plus className="w-3 h-3" />
+        </Button>
+      </div>
+      <AlertDialog open={!!deleteCandidate} onOpenChange={(open) => {
+        if (!open && !deleting) {
+          setDeleteCandidate(null);
+          setDeleteWarning("nested");
+        }
+      }}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>{T("حذف زیرتسک؟", "Delete subtask?")}</AlertDialogTitle>
+            <AlertDialogDescription>
+              {deleteWarning === "unverified"
+                ? T(
+                    "فهرست زیرتسک‌ها از سرور تأیید نشده است؛ ممکن است زیرتسک‌های تو در تو نیز حذف شوند.",
+                    "The child list could not be verified with the server; nested subtasks may also be deleted.",
+                  )
+                : T(
+                    "این زیرتسک و همهٔ زیرتسک‌های تو در توی آن حذف می‌شوند.",
+                    "This subtask and all of its nested subtasks will be deleted.",
+                  )}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={deleting}>{T("انصراف", "Cancel")}</AlertDialogCancel>
+            <AlertDialogAction onClick={() => { void confirmRemove(); }} disabled={deleting}>
+              {T("حذف زیرتسک", "Delete subtask")}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+    </div>
+  );
+}
+
+function SortableSubtaskRow({
+  sub, readOnly, onToggle, onPatch, onChangeTitle, onBlur, onOpen, onDelete, isEn, T,
+}: {
+  sub: Sub;
+  readOnly: boolean;
+  onToggle: () => void;
+  onPatch: (patch: Partial<Task>) => void;
+  onChangeTitle: (title: string) => void;
+  onBlur?: () => void;
+  onOpen?: () => void;
+  onDelete: () => void;
+  isEn: boolean;
+  T: (fa: string, en: string) => string;
+}) {
+  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
+    id: sub.id,
+    disabled: readOnly,
+  });
+  const style = {
+    transform: CSS.Transform.toString(transform),
+    transition,
+    opacity: isDragging ? 0.6 : 1,
+  };
+  return (
+    <li ref={setNodeRef} style={style} className="flex items-start gap-1.5 group">
+      {!readOnly && (
+        <button
+          type="button"
+          {...attributes}
+          {...listeners}
+          className="pt-1.5 text-muted-foreground hover:text-foreground cursor-grab active:cursor-grabbing touch-none shrink-0"
+          aria-label={T("جابجایی", "Drag")}
+          title={T("جابجایی", "Drag")}
+        >
+          <GripVertical className="w-3.5 h-3.5" />
+        </button>
+      )}
+      <div className="pt-1.5"><Checkbox checked={sub.completed} onCheckedChange={onToggle} disabled={readOnly} /></div>
+      <div className="flex-1 min-w-0">
+      <AutoTextarea
+        value={sub.title}
+        onChange={(e) => onChangeTitle(e.target.value)}
+        onBlur={onBlur}
+        disabled={readOnly}
+        minHeight={28}
+        maxHeight={240}
+        rows={1}
+        className={`text-sm flex-1 min-w-0 border-none bg-transparent focus-visible:ring-1 px-1 py-1 leading-snug break-words whitespace-pre-wrap ${
+          sub.completed ? "line-through text-muted-foreground" : ""
+        }`}
+      />
+      <TaskPlanningPicker task={{ ...sub, priority: sub.priority || "none", status: sub.status || "todo" } as Task} onPatch={onPatch} disabled={readOnly} />
+      </div>
+      {onOpen && (
+        <Button
+          type="button"
+          size="sm"
+          variant="ghost"
+          onClick={onOpen}
+          className="h-7 px-2 text-xs gap-1 opacity-90 sm:opacity-75 sm:hover:opacity-100 text-muted-foreground hover:text-foreground shrink-0 rounded-lg hover:bg-muted/60 transition-all active:scale-95"
+          title={T("باز کردن زیرتسک", "Open subtask")}
+        >
+          <span className="text-[11px] font-medium">{T("باز کردن", "Open")}</span>
+          {isEn ? <ChevronRight className="w-3.5 h-3.5" /> : <ChevronLeft className="w-3.5 h-3.5" />}
+        </Button>
+      )}
+      {!readOnly && (
+        <Button
+          size="icon"
+          variant="ghost"
+          onClick={onDelete}
+          aria-label={T(`حذف زیرتسک ${sub.title}`, `Delete subtask ${sub.title}`)}
+          className="h-6 w-6 text-muted-foreground/60 hover:text-destructive focus-visible:text-destructive"
+        >
+          <Trash2 className="w-3 h-3" />
+        </Button>
+      )}
+    </li>
+  );
+}

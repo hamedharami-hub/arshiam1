@@ -1,0 +1,413 @@
+import { HeaderTitlePortal } from "@/components/HeaderTitlePortal";
+import { useEffect, useMemo, useState } from "react";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Button } from "@/components/ui/button";
+import { firebaseStore } from "@/lib/firebaseStore";
+import { useAuth } from "@/hooks/useAuth";
+import { useBilingual } from "@/hooks/useBilingual";
+import { format, startOfDay, subDays, isSameDay, isWithinInterval, endOfDay } from "date-fns";
+import { getCalendarSystem, formatDate, toPersianDigits, jalaliDayOfWeek, WEEKDAY_SHORT_FA, type CalendarSystem } from "@/lib/jalali";
+import { isTaskOverdue } from "@/lib/taskPlanning";
+import { getTimeSettings } from "@/lib/timeHorizon";
+import type { Task } from "@/lib/taskTypes";
+import { focusMinutesInRange, type FocusMetricSession } from "@/lib/focusMetrics";
+import { getFocusState, subscribeFocus } from "@/lib/focusSession";
+import {
+  Bar,
+  Line,
+  ResponsiveContainer,
+  XAxis,
+  YAxis,
+  Tooltip,
+  CartesianGrid,
+  ComposedChart,
+} from "recharts";
+import { CheckCircle2, Clock, Flame, AlertCircle, Target, TrendingUp } from "lucide-react";
+
+type TaskRow = Pick<Task, "id" | "title" | "completed" | "completed_at" | "due_date" | "priority"> & Partial<Task>;
+type PomRow = FocusMetricSession;
+type HabitLogRow = { habit_id: string; log_date: string; habits: { name: string; target_per_week: number; frequency: "daily" | "weekly" } | null };
+
+type Period = "today" | "week" | "month";
+
+export default function StatsView() {
+  const { user } = useAuth();
+  const { T, isEn } = useBilingual();
+  const [system] = useState<CalendarSystem>(getCalendarSystem());
+  const [period, setPeriod] = useState<Period>("week");
+  const [snapshot, setSnapshot] = useState<{ ownerId: string; tasks: TaskRow[]; sessions: PomRow[]; habits: HabitLogRow[] } | null>(null);
+  const [loadState, setLoadState] = useState<{ ownerId: string | null; status: "loading" | "ready" | "error" }>({ ownerId: null, status: "loading" });
+  const [now, setNow] = useState(() => new Date());
+  const [refreshKey, setRefreshKey] = useState(0);
+  const currentSnapshot = snapshot?.ownerId === user?.id ? snapshot : null;
+  const tasks = currentSnapshot?.tasks || [];
+  const pomSessions = currentSnapshot?.sessions || [];
+  const habitLogs = currentSnapshot?.habits || [];
+  const status = loadState.ownerId === (user?.id || null) ? loadState.status : "loading";
+  const todayKey = format(now, "yyyy-MM-dd");
+  const todayStart = useMemo(() => startOfDay(now), [todayKey]);
+  const weekStart = useMemo(() => startOfDay(subDays(now, 6)), [todayKey]);
+  const monthStart = useMemo(() => startOfDay(subDays(now, 29)), [todayKey]);
+
+  const periodStart = period === "today" ? todayStart : period === "week" ? weekStart : monthStart;
+
+  useEffect(() => {
+    const refresh = () => { setNow(new Date()); setRefreshKey((key) => key + 1); };
+    const events = ["tasks-changed", "habits-changed", "habit-logs-changed", "firebase-store-changed"];
+    events.forEach((event) => window.addEventListener(event, refresh));
+    window.addEventListener("focus", refresh);
+    const onVisibility = () => { if (document.visibilityState === "visible") refresh(); };
+    document.addEventListener("visibilitychange", onVisibility);
+    const timer = window.setInterval(() => setNow(new Date()), 30_000);
+    // Runtime notifications include stopped sessions, not only completions.
+    let outcomeVersion = getFocusState().completedVersion;
+    const unsubscribe = subscribeFocus(() => {
+      const nextVersion = getFocusState().completedVersion;
+      if (nextVersion !== outcomeVersion) { outcomeVersion = nextVersion; refresh(); }
+    });
+    return () => {
+      events.forEach((event) => window.removeEventListener(event, refresh));
+      window.removeEventListener("focus", refresh);
+      document.removeEventListener("visibilitychange", onVisibility);
+      window.clearInterval(timer);
+      unsubscribe();
+    };
+  }, []);
+
+  useEffect(() => {
+    const ownerId = user?.id;
+    setSnapshot(null);
+    setLoadState({ ownerId: ownerId || null, status: ownerId ? "loading" : "ready" });
+    if (!ownerId) return;
+    let active = true;
+    const start = startOfDay(subDays(new Date(), 29));
+    const end = new Date();
+    const isoStart = start.toISOString();
+    const isoEnd = end.toISOString();
+    const load = async () => {
+      try {
+        const [taskResult, sessionResult, habitResult] = await Promise.all([
+          firebaseStore.from("tasks")
+            .select("id,title,completed,completed_at,due_date,priority,status,due_at,horizon,period_start,period_end,is_exact,bucket_kind,bucket_anchor,bucket_calendar,planning_horizon,planning_start,planning_end")
+            .eq("user_id", ownerId),
+          firebaseStore.from("pomodoro_sessions")
+            .select("duration_minutes,ended_at,completed")
+            .eq("user_id", ownerId)
+            .gte("ended_at", isoStart)
+            .lte("ended_at", isoEnd)
+            .order("ended_at", { ascending: true }),
+          firebaseStore.from("habit_logs")
+            .select("habit_id, log_date, habits(name, target_per_week, frequency)")
+            .eq("user_id", ownerId)
+            .gte("log_date", format(start, "yyyy-MM-dd"))
+            .lte("log_date", format(end, "yyyy-MM-dd"))
+            .order("log_date", { ascending: true }),
+        ]);
+        if (!active) return;
+        if (taskResult.error || sessionResult.error || habitResult.error) throw new Error("Stats read failed");
+        const rows = (taskResult.data as TaskRow[] | null) || [];
+        const filtered = rows.filter((t) => {
+          if (t.completed) {
+            if (!t.completed_at) return false;
+            const d = new Date(t.completed_at);
+            return d >= start && d <= end;
+          }
+          return isTaskOverdue(t, getTimeSettings());
+        });
+        setSnapshot({ ownerId, tasks: filtered, sessions: (sessionResult.data as PomRow[] | null) || [], habits: (habitResult.data as HabitLogRow[] | null) || [] });
+        setNow(new Date());
+        setLoadState({ ownerId, status: "ready" });
+      } catch {
+        if (active) setLoadState({ ownerId, status: "error" });
+      }
+    };
+    void load();
+    return () => { active = false; };
+  }, [user?.id, todayKey, refreshKey]);
+
+  const periodEnd = now;
+
+  const completedTasks = useMemo(() =>
+    tasks.filter((t) => t.completed && t.completed_at && isWithinInterval(new Date(t.completed_at), { start: periodStart, end: periodEnd })),
+  [tasks, periodStart, periodEnd]);
+
+  const overdueTasks = useMemo(() =>
+    tasks.filter((t) => isTaskOverdue(t, getTimeSettings())),
+  [tasks, todayStart]);
+
+  const focusMinutes = useMemo(() => focusMinutesInRange(pomSessions, periodStart, periodEnd),
+  [pomSessions, periodStart, periodEnd]);
+
+  const habitStats = useMemo(() => {
+    const byHabit = new Map<string, { name: string; target: number; frequency: "daily" | "weekly"; days: Set<string> }>();
+    habitLogs.forEach((l) => {
+      const h = l.habits;
+      if (!h) return;
+      if (!byHabit.has(l.habit_id)) {
+        byHabit.set(l.habit_id, { name: h.name, target: h.target_per_week || 7, frequency: h.frequency, days: new Set() });
+      }
+      byHabit.get(l.habit_id)!.days.add(l.log_date);
+    });
+
+    const start = periodStart;
+    const expectedDays = period === "today" ? 1 : period === "week" ? 7 : 30;
+
+    return Array.from(byHabit.entries()).map(([id, h]) => {
+      const logsInPeriod = Array.from(h.days).filter((d) => {
+        return d >= format(start, "yyyy-MM-dd") && d <= format(periodEnd, "yyyy-MM-dd");
+      }).length;
+      const targetDays = h.frequency === "daily" ? expectedDays : Math.min(expectedDays / 7, 4) * (h.target || 1);
+      const rate = targetDays > 0 ? Math.min(100, Math.round((logsInPeriod / targetDays) * 100)) : 0;
+      return { id, name: h.name, logs: logsInPeriod, target: Math.round(targetDays), rate };
+    }).sort((a, b) => b.rate - a.rate);
+  }, [habitLogs, period, periodStart, periodEnd]);
+
+  const chartData = useMemo(() => {
+    const days = period === "today"
+      ? [todayStart]
+      : Array.from({ length: period === "week" ? 7 : 30 }, (_, i) => startOfDay(subDays(now, (period === "week" ? 7 : 30) - 1 - i)));
+
+    return days.map((d) => {
+      const taskCount = tasks.filter((t) => t.completed && t.completed_at && isSameDay(new Date(t.completed_at), d)).length;
+      const minutes = focusMinutesInRange(pomSessions, d, new Date(Math.min(endOfDay(d).getTime(), periodEnd.getTime())));
+      const weekday = system === "jalali" ? WEEKDAY_SHORT_FA[jalaliDayOfWeek(d)] : format(d, "EEE")[0];
+      const dayNum = system === "jalali" ? formatDate(d, "d", "jalali") : format(d, "d");
+      return { label: `${weekday} ${dayNum}`, tasks: taskCount, minutes, date: d };
+    });
+  }, [tasks, pomSessions, period, system, todayStart, periodEnd]);
+
+  const bestHabit = habitStats[0];
+
+  const chartTotals = useMemo(() => {
+    const totalTasks = chartData.reduce((sum, d) => sum + d.tasks, 0);
+    const totalMinutes = chartData.reduce((sum, d) => sum + d.minutes, 0);
+    const bestDay = chartData.reduce((best, d) => (d.minutes > best.minutes ? d : best), chartData[0]);
+    return { totalTasks, totalMinutes, bestDay };
+  }, [chartData]);
+
+  return (
+    <div dir={isEn ? "ltr" : "rtl"} className="page-shell page-shell--narrow space-y-6 pb-safe-bottom page-enter">
+      <div className="flex items-center justify-between flex-wrap gap-3">
+        <div>
+          <HeaderTitlePortal title={T("آمار و خلاصه", "Stats & Summary")} />
+          <p className="text-xs md:text-sm text-muted-foreground mt-1">
+            {system === "jalali" ? formatDate(now, "d MMMM yyyy", "jalali") : format(now, "MMMM d, yyyy")}
+          </p>
+        </div>
+        <div className="flex rounded-lg bg-muted p-0.5">
+          {(["today", "week", "month"] as Period[]).map((p) => (
+            <Button
+              key={p}
+              type="button"
+              size="sm"
+              variant={period === p ? "secondary" : "ghost"}
+              className="text-xs h-8"
+              onClick={() => setPeriod(p)}
+            >
+              {p === "today"
+                ? T("امروز", "Today")
+                : p === "week"
+                ? (isEn ? "7 Days" : "۷ روز")
+                : (isEn ? "30 Days" : "۳۰ روز")}
+            </Button>
+          ))}
+        </div>
+      </div>
+
+      <Button type="button" variant="outline" size="sm" onClick={() => { setNow(new Date()); setRefreshKey((key) => key + 1); }}>{T("تازه‌سازی", "Refresh")}</Button>
+      {status === "loading" && <p role="status">{T("در حال بارگذاری آمار…", "Loading statistics…")}</p>}
+      {status === "error" && <div role="alert" className="rounded-lg border border-destructive/40 p-3">
+        <p>{T("بارگذاری آمار ناموفق بود.", "Could not load statistics.")}</p>
+        <Button type="button" variant="outline" onClick={() => setRefreshKey((key) => key + 1)}>{T("تلاش دوباره", "Retry")}</Button>
+      </div>}
+      {status === "ready" && <>
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-3 stagger-children">
+        <SummaryCard
+          icon={CheckCircle2}
+          label={T("تسک انجام‌شده", "Completed Tasks")}
+          value={isEn ? String(completedTasks.length) : toPersianDigits(completedTasks.length)}
+          tone="bg-success/15 text-success"
+        />
+        <SummaryCard
+          icon={Clock}
+          label={T("دقیقه تمرکز", "Focus Minutes")}
+          value={isEn ? String(focusMinutes) : toPersianDigits(focusMinutes)}
+          tone="bg-warning/15 text-warning"
+        />
+        <SummaryCard
+          icon={Flame}
+          label={T("عادت موفق", "Best Habit")}
+          value={bestHabit ? (isEn ? `${bestHabit.rate}%` : toPersianDigits(bestHabit.rate) + "%") : "—"}
+          tone="bg-primary/15 text-primary"
+        />
+        <SummaryCard
+          icon={AlertCircle}
+          label={T("تسک عقب‌افتاده", "Overdue Tasks")}
+          value={isEn ? String(overdueTasks.length) : toPersianDigits(overdueTasks.length)}
+          tone="bg-destructive/15 text-destructive"
+        />
+      </div>
+
+      <Card className="animate-fade-in-up" style={{ animationDelay: "80ms" }}>
+        <CardHeader className="pb-2">
+          <CardTitle className="text-base flex items-center gap-2">
+            <Target className="w-4 h-4 text-primary" /> {T("فعالیت روزانه", "Daily Activity")}
+          </CardTitle>
+        </CardHeader>
+        <CardContent>
+          <div className="mb-2 flex flex-wrap items-center gap-3 text-[11px] text-muted-foreground">
+            <span className="flex items-center gap-1.5">
+              <span className="h-2.5 w-2.5 rounded-sm" style={{ background: "hsl(var(--primary) / 0.75)" }} aria-hidden="true" />
+              {T("تسک (تعداد)", "Tasks (count)")}
+            </span>
+            <span className="flex items-center gap-1.5">
+              <span className="h-0.5 w-3.5 rounded-full" style={{ background: "hsl(var(--warning))" }} aria-hidden="true" />
+              {T("تمرکز (دقیقه)", "Focus (min)")}
+            </span>
+          </div>
+          <div className="h-48 w-full" aria-hidden="true">
+            <ResponsiveContainer width="100%" height="100%">
+              <ComposedChart data={chartData} margin={{ top: 8, right: 8, left: -20, bottom: 0 }}>
+                <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="hsl(var(--border))" />
+                <XAxis dataKey="label" tick={{ fontSize: 10 }} axisLine={false} tickLine={false} />
+                <YAxis yAxisId="left" tick={{ fontSize: 10 }} axisLine={false} tickLine={false} />
+                <YAxis yAxisId="right" orientation="right" tick={{ fontSize: 10 }} axisLine={false} tickLine={false} />
+                <Tooltip
+                  contentStyle={{
+                    borderRadius: "1rem",
+                    background: "hsl(var(--popover) / 0.95)",
+                    backdropFilter: "blur(12px)",
+                    border: "1px solid hsl(var(--border))",
+                    boxShadow: "0 10px 25px -5px rgba(0, 0, 0, 0.1)",
+                    fontSize: "12px",
+                    direction: isEn ? "ltr" : "rtl",
+                  }}
+                  formatter={(value: number, name: string) => [
+                    name === "minutes"
+                      ? (isEn ? `${value} min` : `${toPersianDigits(value)} دقیقه`)
+                      : (isEn ? String(value) : toPersianDigits(value)),
+                    name === "minutes" ? T("تمرکز", "Focus") : T("تسک", "Tasks"),
+                  ]}
+                  labelFormatter={(label: string) => label}
+                />
+                <Bar yAxisId="left" dataKey="tasks" radius={[6, 6, 0, 0]} fill="hsl(var(--primary) / 0.75)" />
+                <Line yAxisId="right" type="monotone" dataKey="minutes" stroke="hsl(var(--warning))" strokeWidth={2.5} dot={{ r: 3, fill: "hsl(var(--warning))" }} activeDot={{ r: 5 }} />
+              </ComposedChart>
+            </ResponsiveContainer>
+          </div>
+          <p className="mt-2 text-[11px] leading-5 text-muted-foreground">
+            {isEn
+              ? `Totals: ${chartTotals.totalTasks} tasks, ${chartTotals.totalMinutes} min focus${chartTotals.bestDay.minutes > 0 ? ` · Best day: ${chartTotals.bestDay.label} (${chartTotals.bestDay.minutes} min)` : ""}`
+              : `مجموع: ${toPersianDigits(chartTotals.totalTasks)} تسک، ${toPersianDigits(chartTotals.totalMinutes)} دقیقه تمرکز${chartTotals.bestDay.minutes > 0 ? ` • بهترین روز: ${chartTotals.bestDay.label} (${toPersianDigits(chartTotals.bestDay.minutes)} دقیقه)` : ""}`}
+          </p>
+          <table className="sr-only">
+            <caption>{T("داده‌های فعالیت روزانه: تعداد تسک و دقیقه تمرکز به تفکیک روز", "Daily activity data: tasks and focus minutes by day")}</caption>
+            <thead>
+              <tr>
+                <th scope="col">{T("روز", "Day")}</th>
+                <th scope="col">{T("تسک", "Tasks")}</th>
+                <th scope="col">{T("دقیقه تمرکز", "Focus min")}</th>
+              </tr>
+            </thead>
+            <tbody>
+              {chartData.map((d) => (
+                <tr key={format(d.date, "yyyy-MM-dd")}>
+                  <th scope="row">{d.label}</th>
+                  <td>{isEn ? String(d.tasks) : toPersianDigits(d.tasks)}</td>
+                  <td>{isEn ? String(d.minutes) : toPersianDigits(d.minutes)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </CardContent>
+      </Card>
+
+      {habitStats.length > 0 && (
+        <Card className="animate-fade-in-up" style={{ animationDelay: "140ms" }}>
+          <CardHeader className="pb-2">
+            <CardTitle className="text-base flex items-center gap-2">
+              <Flame className="w-4 h-4 text-primary" /> {T("پیشرفت عادت‌ها", "Habit Progress")}
+            </CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-3">
+          {(() => {
+            const COLORS = [
+              "bg-success",
+              "bg-primary",
+              "bg-warning",
+              "bg-priority-low",
+              "bg-destructive/70",
+              "bg-priority-medium",
+            ];
+            return habitStats.map((h, i) => (
+              <div key={h.id} className="space-y-1">
+                <div className="flex items-center justify-between text-xs">
+                  <span className="font-medium truncate flex-1">{h.name}</span>
+                  <span className="text-muted-foreground tabular-nums">
+                    {isEn
+                      ? `${h.logs}/${h.target} • ${h.rate}%`
+                      : `${toPersianDigits(h.logs)}/${toPersianDigits(h.target)} • ${toPersianDigits(h.rate)}%`}
+                  </span>
+                </div>
+                <div className="h-2 w-full bg-muted rounded-full overflow-hidden">
+                  <div
+                    className={`h-full ${COLORS[i % COLORS.length]} rounded-full transition-all duration-700`}
+                    style={{ width: `${Math.min(100, h.rate)}%` }}
+                  />
+                </div>
+              </div>
+            ));
+          })()}
+          </CardContent>
+        </Card>
+      )}
+
+      {completedTasks.length > 0 && (
+        <Card className="animate-fade-in-up" style={{ animationDelay: "200ms" }}>
+          <CardHeader className="pb-2">
+            <CardTitle className="text-base flex items-center gap-2">
+              <CheckCircle2 className="w-4 h-4 text-primary" /> {T("آخرین تسک‌های انجام‌شده", "Recently Completed Tasks")}
+            </CardTitle>
+          </CardHeader>
+          <CardContent className="divide-y">
+            {completedTasks.slice(-5).reverse().map((t) => (
+              <div key={t.id} className="py-2 flex items-center justify-between text-sm">
+                <span className="truncate flex-1">{t.title}</span>
+                <span className="text-[10px] text-muted-foreground tabular-nums">
+                  {t.completed_at ? (system === "jalali" ? formatDate(new Date(t.completed_at), "d MMM", "jalali") : format(new Date(t.completed_at), "d MMM")) : "—"}
+                </span>
+              </div>
+            ))}
+          </CardContent>
+        </Card>
+      )}
+      </>}
+    </div>
+  );
+}
+
+function SummaryCard({
+  icon: Icon,
+  label,
+  value,
+  tone,
+}: {
+  icon: typeof CheckCircle2;
+  label: string;
+  value: string;
+  tone: string;
+}) {
+  return (
+    <div className="group rounded-2xl border border-border/50 bg-card p-4 shadow-2xs card-hover animate-fade-in-up">
+      <div className="flex items-center gap-3">
+        <div className={`grid place-items-center h-9 w-9 rounded-xl ${tone} shrink-0 shadow-xs transition-transform group-hover:scale-105`}>
+          <Icon className="w-4 h-4" />
+        </div>
+        <div className="min-w-0 flex-1">
+          <div className="text-[11px] font-medium text-muted-foreground truncate">{label}</div>
+          <div className="text-xl md:text-2xl font-bold tabular-nums text-foreground mt-0.5">{value}</div>
+        </div>
+      </div>
+    </div>
+  );
+}

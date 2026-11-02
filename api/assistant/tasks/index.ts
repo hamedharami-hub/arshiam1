@@ -1,0 +1,34 @@
+import { InvalidTaskInputError } from "../../_lib/taskInput.js";
+import { authenticateAssistant } from "../../_lib/assistantAccess.js";
+import { createAssistantTask, listAssistantTasks } from "../../_lib/assistantTasks.js";
+import { handleCors, parseBody, sendError, sendJson, sendRequestBodyError } from "../../_lib/response.js";
+import { InvalidTaskPriorityError, InvalidTaskScheduleError } from "../../_lib/taskSchedule.js";
+
+export default async function handler(req: any, res: any) {
+  if (handleCors(req, res)) return;
+  const method = (req.method || "GET").toUpperCase();
+  if (method !== "GET" && method !== "POST") return sendError(res, 405, "METHOD_NOT_ALLOWED", "Use GET or POST.");
+  try {
+    const grant = await authenticateAssistant(req, res, method === "GET" ? "tasks:read" : "tasks:create");
+    if (!grant) return;
+    res.setHeader("Cache-Control", "no-store");
+    if (method === "GET") {
+      const search = typeof req.query?.search === "string" ? req.query.search : undefined;
+      const limit = Number(req.query?.limit || 100);
+      return sendJson(res, 200, { success: true, data: await listAssistantTasks(grant, search, limit) });
+    }
+    const body = await parseBody(req);
+    if (typeof body?.title !== "string" || !body.title.trim() || body.title.length > 500) {
+      return sendError(res, 400, "VALIDATION_ERROR", "A task title of 1 to 500 characters is required.");
+    }
+    const task = await createAssistantTask(grant, body);
+    return sendJson(res, task.alreadyExists ? 200 : 201, { success: true, data: task });
+  } catch (error) {
+    if (sendRequestBodyError(res, error)) return;
+    if (error instanceof InvalidTaskInputError) return sendError(res, 400, "VALIDATION_ERROR", error.message);
+    console.error("Assistant task request failed", error);
+    if (error instanceof InvalidTaskScheduleError) return sendError(res, 400, "VALIDATION_ERROR", error.message);
+    if (error instanceof InvalidTaskPriorityError) return sendError(res, 400, "VALIDATION_ERROR", error.message);
+    return sendError(res, 500, "INTERNAL_ERROR", "Assistant task request failed.");
+  }
+}

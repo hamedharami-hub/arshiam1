@@ -1,0 +1,685 @@
+import { getDocFromCache, runTransaction } from "firebase/firestore";
+import { liveDoc, liveRows } from "./firestoreLive";
+import { isQuotaError, markQuotaExhausted, trackWrite } from "./firestoreUsage";
+import {
+  db,
+  auth,
+  collection,
+  doc,
+  getDoc,
+  getDocs,
+  setDoc,
+  deleteDoc,
+  serverTimestamp,
+} from "./firebase";
+import { firebaseStore } from "./firebaseStore";
+import { cacheGet, cacheSet } from "./offlineDb";
+import {
+  extractTasksFromCache,
+  createTaskCacheEnvelope,
+  withTaskCacheMutationLock,
+} from "@/features/tasks/taskCache";
+import type { Task } from "./taskTypes";
+import { prepareFirestoreBackupRecord } from "./backupRecord";
+import { makeNoteTaskLinkId } from "./noteTaskLinkTypes";
+import { folderScopedWriteAllowed } from "@/lib/folderWriteGuard";
+
+export interface AppUser {
+  id: string;
+  email?: string | null;
+  [key: string]: any;
+}
+
+export type SupportedFirestoreCollection =
+  | "tasks"
+  | "notes"
+  | "habits"
+  | "checkins"
+  | "settings"
+  | "folders"
+  | "tags"
+  | "note_task_links"
+  | "mind_values"
+  | "mind_goals";
+
+export interface SyncStats {
+  tasksCount: number;
+  notesCount: number;
+  habitsCount: number;
+  checkinsCount: number;
+  lastSyncedAt: string | null;
+  failedTasksCount?: number;
+  failedNotesCount?: number;
+}
+
+/**
+ * Saves a single entity to user's private Firestore subcollection:
+ * /users/{userId}/{collectionName}/{docId}
+ * Supports both:
+ * - 4-arg: (userId, collectionName, docId, data)
+ * - 2-arg: (collectionName, entity)
+ * Includes conflict protection against overwriting newer remote documents.
+ */
+export type FirestoreSaveOutcome = "saved" | "stale" | "failed";
+
+export type NoteTaskLinkSaveOutcome = FirestoreSaveOutcome | "missing-endpoint";
+
+type NoteTaskLinkRecord = {
+  id: string;
+  user_id: string;
+  note_id: string;
+  task_id: string;
+  created_at: string;
+};
+
+async function writeNoteTaskLinkTransaction(
+  userId: string,
+  link: NoteTaskLinkRecord,
+  missingEndpointIsNoop: boolean,
+): Promise<NoteTaskLinkSaveOutcome> {
+  if (!userId || auth.currentUser?.uid !== userId || link.user_id !== userId ||
+    !link.id || !link.note_id || !link.task_id || link.id !== makeNoteTaskLinkId(link.note_id, link.task_id)) return "failed";
+
+  const noteRef = doc(db, "users", userId, "notes", link.note_id);
+  const taskRef = doc(db, "users", userId, "tasks", link.task_id);
+  const linkRef = doc(db, "users", userId, "note_task_links", link.id);
+  let didWrite = false;
+  try {
+    const outcome = await runTransaction(db, async (tx) => {
+      didWrite = false;
+      // Read every endpoint and the deterministic relationship document before
+      // writing. This both verifies owner-scoped existence and makes replay
+      // safe when a source was deleted while the device was offline.
+      const noteSnapshot = await tx.get(noteRef);
+      const taskSnapshot = await tx.get(taskRef);
+      const existing = await tx.get(linkRef);
+      if (auth.currentUser?.uid !== userId) return "failed" as const;
+      if (!noteSnapshot.exists() || !taskSnapshot.exists()) {
+        return missingEndpointIsNoop ? "saved" as const : "missing-endpoint" as const;
+      }
+      if (existing.exists()) {
+        const row = existing.data();
+        return row.user_id === userId && row.note_id === link.note_id && row.task_id === link.task_id
+          ? "saved" as const
+          : "failed" as const;
+      }
+      tx.set(linkRef, {
+        ...link,
+        id: link.id,
+        user_id: userId,
+        userId,
+        updatedAt: new Date().toISOString(),
+        _firestoreSyncAt: Date.now(),
+      });
+      didWrite = true;
+      return "saved" as const;
+    });
+    if (outcome === "saved" && didWrite) trackWrite(1, "note_task_links");
+    return outcome;
+  } catch (error) {
+    if (isQuotaError(error)) markQuotaExhausted();
+    throw error;
+  }
+}
+
+/** Owner-checked, idempotent relationship write used by the online path. */
+export function saveNoteTaskLinkWithOutcome(
+  userId: string,
+  link: NoteTaskLinkRecord,
+): Promise<NoteTaskLinkSaveOutcome> {
+  return writeNoteTaskLinkTransaction(userId, link, false);
+}
+
+/** Replay a stable queued link; a missing endpoint means the source was deleted. */
+export function replayQueuedNoteTaskLinkWithOutcome(
+  userId: string,
+  docId: string,
+  link: NoteTaskLinkRecord,
+): Promise<NoteTaskLinkSaveOutcome> {
+  if (docId !== link.id) return Promise.resolve("failed");
+  return writeNoteTaskLinkTransaction(userId, link, true);
+}
+
+/** Recheck a queued mutation against the server in the same transaction that writes it. */
+export async function replayQueuedEntityWithOutcome(
+  userId: string,
+  collectionName: SupportedFirestoreCollection,
+  docId: string,
+  mutation: { op: "insert" | "update" | "upsert" | "delete"; payload?: Record<string, unknown>; createdAt: number; expectedRevision?: string; mutationId?: string },
+): Promise<FirestoreSaveOutcome> {
+  if (!userId || !docId || auth.currentUser?.uid !== userId) return "failed";
+  const ref = doc(db, "users", userId, collectionName, docId);
+  try {
+    const outcome = await runTransaction(db, async (tx) => {
+      const snapshot = await tx.get(ref);
+      if (auth.currentUser?.uid !== userId) return "failed";
+      if (mutation.op === "delete") {
+        if (!snapshot.exists()) return "saved";
+        const remote = snapshot.data();
+        const remoteRevision = remote.updated_at ?? remote.updatedAt;
+        // Exact base revision is required: client clocks cannot order two devices' edits safely.
+        if (typeof mutation.expectedRevision !== "string" ||
+          typeof remoteRevision !== "string" || remoteRevision !== mutation.expectedRevision) return "stale";
+        tx.delete(ref);
+        return "saved";
+      }
+
+      if (!mutation.payload || (!snapshot.exists() && (mutation.op === "update" || mutation.expectedRevision !== undefined))) return "stale";
+      if (["tasks", "notes", "folders", "folder_columns"].includes(collectionName)) {
+        if (mutation.mutationId && snapshot.exists() && snapshot.data()._lastQueuedMutationId === mutation.mutationId) return "saved";
+        const guardPayload = snapshot.exists() ? { ...snapshot.data(), ...mutation.payload } : mutation.payload;
+        if (!await folderScopedWriteAllowed(
+          tx,
+          userId,
+          collectionName as "tasks" | "notes" | "folders" | "folder_columns",
+          guardPayload,
+          snapshot,
+        )) return "stale";
+      }
+      if (snapshot.exists()) {
+        const remote = snapshot.data();
+        if (mutation.mutationId && remote._lastQueuedMutationId === mutation.mutationId) return "saved";
+        const remoteRevision = remote.updated_at ?? remote.updatedAt;
+        // A queued edit is based on one specific cloud version, regardless of clock order.
+        if (typeof mutation.expectedRevision !== "string" ||
+          typeof remoteRevision !== "string" || remoteRevision !== mutation.expectedRevision) return "stale";
+      }
+      tx.set(ref, {
+        ...stripUndefinedDeep(mutation.payload), id: docId, userId,
+        updatedAt: new Date().toISOString(), _firestoreSyncAt: Date.now(),
+        ...(mutation.mutationId ? { _lastQueuedMutationId: mutation.mutationId } : {}),
+      }, { merge: true });
+      return "saved";
+    });
+    if (outcome === "saved") trackWrite(1, collectionName);
+    return outcome;
+  } catch (error) {
+    if (isQuotaError(error)) markQuotaExhausted();
+    throw error;
+  }
+}
+
+const conflictReviewCollections = new Set<SupportedFirestoreCollection>([
+  "tasks", "notes", "habits", "folders", "tags", "mind_values", "mind_goals",
+]);
+
+/** Read a queued stale-write's current cloud version without mutating either copy. */
+export async function getFirestoreConflictSnapshot(
+  userId: string,
+  collectionName: string,
+  docId: string,
+): Promise<{ exists: boolean; data?: Record<string, unknown> }> {
+  if (!userId || auth.currentUser?.uid !== userId) {
+    throw new Error("Sign in to the same account that owns this queued change.");
+  }
+  if (!docId || !conflictReviewCollections.has(collectionName as SupportedFirestoreCollection)) {
+    throw new Error("This queued change does not support cloud-version review.");
+  }
+
+  const snapshot = await getDoc(doc(db, "users", userId, collectionName, docId));
+  if (auth.currentUser?.uid !== userId) throw new Error("Account changed while reading the cloud copy.");
+  if (!snapshot.exists()) return { exists: false };
+  return { exists: true, data: { ...snapshot.data(), id: snapshot.id } };
+}
+
+// Firestore rejects `undefined` anywhere in a document; drop those fields instead of failing the write.
+export function stripUndefinedDeep<T>(value: T): T {
+  if (Array.isArray(value)) return value.filter((v) => v !== undefined).map(stripUndefinedDeep) as unknown as T;
+  if (value && typeof value === "object" && Object.getPrototypeOf(value) === Object.prototype) {
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+      if (v !== undefined) out[k] = stripUndefinedDeep(v);
+    }
+    return out as T;
+  }
+  return value;
+}
+
+export async function saveEntityToFirestoreWithOutcome(
+  userIdOrCollection: string,
+  collectionOrData: SupportedFirestoreCollection | string | Record<string, any>,
+  docIdOrNothing?: string,
+  dataOrNothing?: Record<string, any>,
+  throwOnError = false,
+): Promise<FirestoreSaveOutcome> {
+  let userId = "";
+  let collectionName = "";
+  let docId = "";
+  let data: Record<string, any> = {};
+
+  if (typeof docIdOrNothing === "string" && dataOrNothing) {
+    userId = userIdOrCollection;
+    collectionName = collectionOrData as string;
+    docId = docIdOrNothing;
+    data = dataOrNothing;
+  } else if (typeof collectionOrData === "object" && collectionOrData !== null) {
+    collectionName = userIdOrCollection;
+    data = collectionOrData;
+    docId = String(data.id || "");
+    userId = String(data.user_id || data.userId || auth.currentUser?.uid || "");
+  }
+
+  if (!userId || !docId || !collectionName) return "failed";
+
+  try {
+    const docRef = doc(db, "users", userId, collectionName, docId);
+    if (["tasks", "notes", "folders", "folder_columns"].includes(collectionName)) {
+      if (auth.currentUser?.uid !== userId) return "failed";
+      const guardedOutcome = await runTransaction(db, async (transaction) => {
+        const snapshot = await transaction.get(docRef);
+        const mergedData = snapshot.exists() ? { ...snapshot.data(), ...data } : data;
+        if (!await folderScopedWriteAllowed(
+          transaction,
+          userId,
+          collectionName as "tasks" | "notes" | "folders" | "folder_columns",
+          mergedData,
+          snapshot,
+        )) return "stale" as const;
+        if (snapshot.exists()) {
+          const remote = snapshot.data();
+          const remoteUpdatedAt = remote?.updated_at || remote?.updatedAt;
+          const localUpdatedAt = data.updated_at || data.updatedAt;
+          if (remoteUpdatedAt && localUpdatedAt && new Date(remoteUpdatedAt).getTime() > new Date(localUpdatedAt).getTime()) return "stale" as const;
+        }
+        if (auth.currentUser?.uid !== userId) return "failed" as const;
+        transaction.set(docRef, {
+          ...stripUndefinedDeep(data),
+          id: docId,
+          userId,
+          updatedAt: new Date().toISOString(),
+          _firestoreSyncAt: Date.now(),
+        }, { merge: true });
+        return "saved" as const;
+      });
+      if (guardedOutcome === "saved") trackWrite(1, collectionName);
+      return guardedOutcome;
+    }
+
+
+
+    // Conflict protection: check the current cloud revision before writing.
+    // The local copy (shared listener or persistent cache) is the reference; no server
+    // read per save while it can answer.
+    try {
+      let remoteData: Record<string, any> | null | undefined = liveDoc(userId, collectionName, docId);
+      if (remoteData === undefined) {
+        try {
+          const cached = await getDocFromCache(docRef);
+          // A cache miss is not proof that the document is absent on the server, so
+          // only a cached copy counts as verified here.
+          remoteData = cached.exists() ? cached.data() : undefined;
+        } catch {
+          remoteData = undefined;
+        }
+      }
+      if (remoteData === undefined) {
+        // Neither source has the document: re-base on the server revision instead of
+        // writing unverified. A missing server document is a genuine first write.
+        const serverSnapshot = await getDoc(docRef);
+        remoteData = serverSnapshot.exists() ? serverSnapshot.data() : null;
+      }
+      if (remoteData) {
+        // `updated_at` is the application's revision timestamp when available.
+        // `updatedAt` is refreshed here as a Firestore sync receipt timestamp,
+        // so preferring it can incorrectly reject a newer local application edit.
+        // Keep `updatedAt` as a fallback for legacy/camel-case-only entities.
+        const remoteUpdatedAt = remoteData?.updated_at || remoteData?.updatedAt;
+        const localUpdatedAt = data.updated_at || data.updatedAt;
+        if (remoteUpdatedAt && localUpdatedAt) {
+          const remoteTime = new Date(remoteUpdatedAt).getTime();
+          const localTime = new Date(localUpdatedAt).getTime();
+          if (remoteTime > localTime) {
+            console.info(`[FirestoreSync] Remote document is newer than local data for ${collectionName}/${docId}. Rejecting stale write.`);
+            return "stale";
+          }
+        }
+      }
+    } catch (error) {
+      // A durable outbox may retry this mutation later, but writing without a
+      // readable current revision could overwrite a newer remote document.
+      console.warn(`[FirestoreSync] Could not verify ${collectionName}/${docId}; refusing the write.`, error);
+      if (throwOnError) throw error;
+      return "failed";
+    }
+
+    await setDoc(
+      docRef,
+      {
+        ...stripUndefinedDeep(data),
+        id: docId,
+        userId,
+        updatedAt: new Date().toISOString(),
+        _firestoreSyncAt: Date.now(),
+      },
+      { merge: true }
+    );
+    trackWrite(1, collectionName);
+    return "saved";
+  } catch (error) {
+    if (isQuotaError(error)) markQuotaExhausted();
+    console.warn(`[FirestoreSync] Failed to save ${collectionName}/${docId}:`, error);
+    if (throwOnError) throw error;
+    return "failed";
+  }
+}
+
+/** Boolean compatibility wrapper for existing non-queue callers. */
+export async function saveEntityToFirestore(
+  userIdOrCollection: string,
+  collectionOrData: SupportedFirestoreCollection | string | Record<string, any>,
+  docIdOrNothing?: string,
+  dataOrNothing?: Record<string, any>,
+): Promise<boolean> {
+  return (await saveEntityToFirestoreWithOutcome(
+    userIdOrCollection,
+    collectionOrData,
+    docIdOrNothing,
+    dataOrNothing,
+  )) === "saved";
+}
+
+/**
+ * Deletes an entity from user's private Firestore subcollection.
+ * Supports both:
+ * - 3-arg: (userId, collectionName, docId)
+ * - 2-arg: (collectionName, docId)
+ */
+export async function deleteEntityFromFirestore(
+  userIdOrCollection: string,
+  collectionOrDocId: SupportedFirestoreCollection | string,
+  docIdOrNothing?: string
+): Promise<boolean> {
+  let userId = "";
+  let collectionName = "";
+  let docId = "";
+
+  if (docIdOrNothing) {
+    userId = userIdOrCollection;
+    collectionName = collectionOrDocId;
+    docId = docIdOrNothing;
+  } else {
+    collectionName = userIdOrCollection;
+    docId = collectionOrDocId;
+    userId = auth.currentUser?.uid || "";
+  }
+
+  if (!userId || !docId || !collectionName) return false;
+
+  try {
+    const docRef = doc(db, "users", userId, collectionName, docId);
+    await deleteDoc(docRef);
+    return true;
+  } catch (error) {
+    console.warn(`[FirestoreSync] Failed to delete ${collectionName}/${docId}:`, error);
+    return false;
+  }
+}
+
+/**
+ * Reads user's local tasks and notes cache and pushes all items to Firestore
+ */
+export async function backupAllToFirestore(
+  user: AppUser,
+  localTasks: Task[] = [],
+  localNotes: any[] = []
+): Promise<{ success: boolean; stats: SyncStats; message: string }> {
+  if (!user || !user.id) {
+    return {
+      success: false,
+      stats: { tasksCount: 0, notesCount: 0, habitsCount: 0, checkinsCount: 0, lastSyncedAt: null, failedTasksCount: 0, failedNotesCount: 0 },
+      message: "کاربر وارد نشده است",
+    };
+  }
+
+  let savedTasks = 0;
+  let savedNotes = 0;
+  let failedTasks = 0;
+  let failedNotes = 0;
+
+  try {
+    // 1. Gather tasks from all potential sources
+    let tasksToSync: Task[] = [...localTasks];
+    if (!tasksToSync.length) {
+      // Unscoped legacy caches can belong to a different account on this device.
+      const cached = await cacheGet<unknown>(`tasks:all:${user.id}`);
+      const extracted = extractTasksFromCache(cached);
+      if (extracted.length) {
+        tasksToSync = extracted;
+      }
+    }
+
+    // If still empty and online, try fetching from firebaseStore
+    if (!tasksToSync.length && typeof navigator !== "undefined" && navigator.onLine) {
+      try {
+        const response = await (firebaseStore.from("tasks") as any)
+          .select("*")
+          .eq("user_id", user.id)
+          .limit(2000);
+        if (response.error || !Array.isArray(response.data)) {
+          throw response.error || new Error("Task source could not be verified");
+        }
+        if (response.data.length) {
+          await withTaskCacheMutationLock(user.id, async () => {
+            let latestLocalTasks: Task[] = [];
+            try {
+              latestLocalTasks = extractTasksFromCache(
+                await cacheGet<unknown>(`tasks:all:${user.id}`),
+              );
+            } catch {
+              // Continue using the verified remote result if local cache is unavailable.
+            }
+            const tasksById = new Map<string, Task>();
+            for (const task of response.data as Task[]) tasksById.set(task.id, task);
+            // A cache mutation that completed while the backup query was in
+            // flight is newer than the response and must not be overwritten.
+            for (const task of latestLocalTasks) tasksById.set(task.id, task);
+            tasksToSync = Array.from(tasksById.values());
+            await cacheSet(`tasks:all:${user.id}`, createTaskCacheEnvelope(tasksToSync));
+          });
+        }
+      } catch (error) {
+        console.warn("[FirestoreSync] Could not verify task source for backup:", error);
+        throw new Error("تسک‌های موجود از منبع ابری قابل بررسی نبودند؛ برای جلوگیری از گزارش موفقیت ناقص، همگام‌سازی انجام نشد.");
+      }
+    } else if (!tasksToSync.length && typeof navigator !== "undefined" && !navigator.onLine) {
+      throw new Error("اتصال اینترنت نیست و نسخهٔ محلی تسک‌ها برای همگام‌سازی پیدا نشد.");
+    }
+
+    // 2. Gather notes from all potential sources
+    let notesToSync: any[] = [...localNotes];
+    if (!notesToSync.length) {
+      const cachedNotes = await cacheGet<any[]>(`notes:all:${user.id}`);
+      if (Array.isArray(cachedNotes) && cachedNotes.length) {
+        notesToSync = cachedNotes;
+      }
+    }
+
+    // If still empty and online, try fetching notes from firebaseStore
+    if (!notesToSync.length && typeof navigator !== "undefined" && navigator.onLine) {
+      try {
+        const response = await (firebaseStore.from("notes") as any)
+          .select("*")
+          .eq("user_id", user.id)
+          .limit(1000);
+        if (response.error || !Array.isArray(response.data)) {
+          throw response.error || new Error("Note source could not be verified");
+        }
+        if (response.data.length) {
+          notesToSync = response.data;
+          await cacheSet(`notes:all:${user.id}`, notesToSync);
+        }
+      } catch (error) {
+        console.warn("[FirestoreSync] Could not verify note source for backup:", error);
+        throw new Error("یادداشت‌های موجود از منبع ابری قابل بررسی نبودند؛ برای جلوگیری از گزارش موفقیت ناقص، همگام‌سازی انجام نشد.");
+      }
+    } else if (!notesToSync.length && typeof navigator !== "undefined" && !navigator.onLine) {
+      throw new Error("اتصال اینترنت نیست و نسخهٔ محلی یادداشت‌ها برای همگام‌سازی پیدا نشد.");
+    }
+
+    // Batch sync tasks
+    for (const t of tasksToSync) {
+      if (!t || typeof t.id !== "string" || !t.id.trim()) {
+        failedTasks++;
+        continue;
+      }
+      const ok = await saveEntityToFirestore(
+        user.id,
+        "tasks",
+        t.id,
+        prepareFirestoreBackupRecord(t as unknown as Record<string, unknown>, user.id),
+      );
+      if (ok) savedTasks++;
+      else failedTasks++;
+    }
+
+    // Batch sync notes
+    for (const n of notesToSync) {
+      if (!n || typeof n.id !== "string" || !n.id.trim()) {
+        failedNotes++;
+        continue;
+      }
+      const ok = await saveEntityToFirestore(
+        user.id,
+        "notes",
+        n.id,
+        prepareFirestoreBackupRecord(n as Record<string, unknown>, user.id),
+      );
+      if (ok) savedNotes++;
+      else failedNotes++;
+    }
+
+    const nowIso = new Date().toISOString();
+    const stats: SyncStats = {
+      tasksCount: savedTasks,
+      notesCount: savedNotes,
+      habitsCount: 0,
+      checkinsCount: 0,
+      lastSyncedAt: nowIso,
+      failedTasksCount: failedTasks,
+      failedNotesCount: failedNotes,
+    };
+
+    let syncStatusSaved = true;
+    try {
+      const syncStatusRef = doc(db, "users", user.id, "syncMeta", "current");
+      await setDoc(
+        syncStatusRef,
+        {
+          userId: user.id,
+          userEmail: user.email,
+          lastSyncedAt: nowIso,
+          lastSyncedTimestamp: Date.now(),
+          tasksCount: savedTasks,
+          notesCount: savedNotes,
+          failedTasksCount: failedTasks,
+          failedNotesCount: failedNotes,
+          updatedAt: serverTimestamp(),
+        },
+        { merge: true }
+      );
+    } catch (error) {
+      syncStatusSaved = false;
+      console.warn("[FirestoreSync] Could not save backup status:", error);
+    }
+
+    try {
+      await cacheSet(`firestore_sync_stats_${user.id}`, stats);
+    } catch (error) {
+      // All data rows can still be safely backed up even if this display-only
+      // cache cannot be updated; the Firestore sync status is authoritative.
+      console.warn("[FirestoreSync] Could not cache backup status:", error);
+    }
+
+    const allRowsSaved = failedTasks === 0 && failedNotes === 0;
+    const success = allRowsSaved && syncStatusSaved;
+    const message = success
+      ? `همگام‌سازی ابری کامل شد: ${savedTasks} تسک و ${savedNotes} یادداشت در Firestore ذخیره شدند.`
+      : `همگام‌سازی کامل نشد: ${savedTasks} از ${tasksToSync.length} تسک و ${savedNotes} از ${notesToSync.length} یادداشت ذخیره شدند؛ ${failedTasks} تسک و ${failedNotes} یادداشت ناموفق بودند.${syncStatusSaved ? "" : " وضعیت همگام‌سازی هم ذخیره نشد."}`;
+
+    return {
+      success,
+      stats,
+      message,
+    };
+  } catch (error: any) {
+    console.error("[FirestoreSync] Backup error:", error);
+    return {
+      success: false,
+      stats: {
+        tasksCount: savedTasks,
+        notesCount: savedNotes,
+        habitsCount: 0,
+        checkinsCount: 0,
+        lastSyncedAt: savedTasks + savedNotes > 0 ? new Date().toISOString() : null,
+        failedTasksCount: failedTasks,
+        failedNotesCount: failedNotes,
+      },
+      message: error?.message || "خطا در همگام‌سازی ابری فایربیس",
+    };
+  }
+}
+
+/**
+ * Retrieves all tasks and notes stored in user's Firestore subcollections
+ */
+export async function fetchFromFirestore(
+  userId: string
+): Promise<{ success: boolean; tasks: any[]; notes: any[]; message: string }> {
+  if (!userId) return { success: false, tasks: [], notes: [], message: "شناسه کاربر نامعتبر است" };
+
+  try {
+    const read = async (table: string) => {
+      const live = await liveRows(userId, table);
+      if (live) return live;
+      const snap = await getDocs(collection(db, "users", userId, table));
+      return snap.docs.map((docSnap) => ({ id: docSnap.id, ...docSnap.data() }));
+    };
+    const [tasks, notes] = await Promise.all([read("tasks"), read("notes")]);
+
+    return {
+      success: true,
+      tasks,
+      notes,
+      message: `${tasks.length} تسک و ${notes.length} یادداشت از Firestore بارگذاری شد.`,
+    };
+  } catch (error: any) {
+    console.error("[FirestoreSync] Fetch error:", error);
+    return {
+      success: false,
+      tasks: [],
+      notes: [],
+      message: error?.message || "خطا در دریافت اطلاعات از فایربیس",
+    };
+  }
+}
+
+/**
+ * Gets last sync stats for the user
+ */
+export async function getFirestoreSyncStats(userId: string): Promise<SyncStats | null> {
+  if (!userId) return null;
+  const local = await cacheGet<SyncStats>(`firestore_sync_stats_${userId}`);
+  if (local) return local;
+
+  try {
+    const syncStatusRef = doc(db, "users", userId, "syncMeta", "current");
+    const snap = await getDoc(syncStatusRef);
+    if (snap.exists()) {
+      const d = snap.data();
+      const stats: SyncStats = {
+        tasksCount: d.tasksCount || 0,
+        notesCount: d.notesCount || 0,
+        habitsCount: d.habitsCount || 0,
+        checkinsCount: d.checkinsCount || 0,
+        lastSyncedAt: d.lastSyncedAt || null,
+        failedTasksCount: d.failedTasksCount || 0,
+        failedNotesCount: d.failedNotesCount || 0,
+      };
+      await cacheSet(`firestore_sync_stats_${userId}`, stats);
+      return stats;
+    }
+  } catch {
+    // ignore
+  }
+  return null;
+}

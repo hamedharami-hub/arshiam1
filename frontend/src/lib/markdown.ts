@@ -1,0 +1,152 @@
+import TurndownService from "turndown";
+import { marked } from "marked";
+
+const turndown = new TurndownService({ headingStyle: "atx", codeBlockStyle: "fenced" });
+
+const LEGACY_FORMAT_TAGS = new Set([
+  "a", "blockquote", "br", "code", "del", "div", "em", "h1", "h2", "h3", "h4", "h5", "h6",
+  "hr", "i", "img", "li", "mark", "ol", "p", "pre", "s", "span", "strong", "sub", "sup", "table",
+  "tbody", "td", "th", "thead", "tr", "u", "ul",
+]);
+
+function escapeHtmlAttribute(value: string): string {
+  return value.replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+function escapeMarkdownImageAlt(value: string): string {
+  return value.replace(/\\/g, "\\\\").replace(/([\[\]])/g, "\\$1").replace(/[\r\n]+/g, " ");
+}
+
+function markdownDestination(value: string): string {
+  const safe = value.replace(/[\r\n]+/g, "").replace(/\\/g, "%5C").replace(/</g, "%3C").replace(/>/g, "%3E").replace(/\s/g, "%20");
+  return `<${safe}>`;
+}
+
+/** Old editors sometimes stored base64 images as Markdown image links. Marked
+ * rejects data URLs in link syntax, so make them raw HTML before parsing. */
+function normalizeLegacyBase64Images(source: string): string {
+  return source.replace(/!\[((?:\\.|[^\]])*)\]\((data:image\/[a-z0-9.+-]+;base64,[a-z0-9+/=_-]+)\)/gi, (_match, rawAlt: string, src: string) => {
+    const alt = rawAlt.replace(/\\([\\[\]])/g, "$1");
+    return `<img src="${escapeHtmlAttribute(src)}" alt="${escapeHtmlAttribute(alt)}">`;
+  });
+}
+
+/** Recover older notes that saved formatted HTML as escaped text. */
+export function normalizeNoteMarkup(source: string): string {
+  if (!source) return "";
+  // Only decode when a note starts with an escaped block tag. This avoids
+  // turning intentional inline examples such as `&lt;strong&gt;` into markup.
+  const startsWithEscapedBlock = /^\s*&lt;\/?(?:p|div|h[1-6]|ul|ol|blockquote|pre|table)\b/i.test(source);
+  const startsWithEscapedBase64Image = /^\s*&lt;img\b[\s\S]*?data:image\//i.test(source);
+  if (!startsWithEscapedBlock && !startsWithEscapedBase64Image) return source;
+
+  return source.replace(/&lt;(\/?)((?:[a-z][a-z0-9-]*))([\s\S]*?)&gt;/gi, (raw, closing: string, name: string, attributes: string) => {
+    const tag = name.toLowerCase();
+    if (!LEGACY_FORMAT_TAGS.has(tag)) return raw;
+    const decodedAttributes = attributes
+      .replace(/&quot;|&#34;|&#x22;/gi, '"')
+      .replace(/&#39;|&#x27;/gi, "'");
+    return `<${closing}${tag}${decodedAttributes}>`;
+  });
+}
+
+// Markdown has no underline/highlight syntax; retain semantic HTML for round trips.
+for (const tag of ["u", "mark"] as const) {
+  turndown.addRule(tag, { filter: tag, replacement: (content) => `<${tag}>${content}</${tag}>` });
+}
+turndown.addRule("textColor", {
+  filter: (node: HTMLElement) => ["SPAN", "MARK"].includes(node.nodeName) && Boolean(node.style.color || node.style.backgroundColor),
+  replacement: (content, node: HTMLElement) => {
+    const styles = [node.style.color && `color: ${node.style.color}`, node.style.backgroundColor && `background-color: ${node.style.backgroundColor}`].filter(Boolean).join("; ");
+    const tag = node.nodeName.toLowerCase();
+    return `<${tag} style="${styles}">${content}</${tag}>`;
+  },
+});
+turndown.addRule("textAlignment", {
+  filter: (node: HTMLElement) => /^(P|H[1-3])$/.test(node.nodeName) && /^(left|center|right|justify)$/.test(node.style.textAlign),
+  replacement: (_content, node: HTMLElement) => `\n\n<${node.nodeName.toLowerCase()} style="text-align: ${node.style.textAlign}">${node.innerHTML}</${node.nodeName.toLowerCase()}>\n\n`,
+});
+
+// These blocks cannot be represented by ordinary Markdown without losing
+// attributes or embedded content. Keep their HTML in the Markdown source so
+// visual-editor edits round-trip them intact.
+turndown.addRule("table", {
+  filter: "table",
+  replacement: (_content, node: HTMLElement) => `\n\n${node.outerHTML}\n\n`,
+});
+turndown.addRule("youtubeEmbed", {
+  filter: (node: HTMLElement) => node.nodeName === "DIV" && node.hasAttribute("data-youtube-video"),
+  replacement: (_content, node: HTMLElement) => `\n\n${node.outerHTML}\n\n`,
+});
+turndown.addRule("img", {
+  filter: "img",
+  replacement: (_c, node: HTMLElement) => {
+    const title = node.getAttribute("title")?.replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/[\r\n]+/g, " ");
+    return `![${escapeMarkdownImageAlt(node.getAttribute("alt") || "")}](${markdownDestination(node.getAttribute("src") || "")}${title ? ` "${title}"` : ""})`;
+  },
+});
+turndown.addRule("base64Image", {
+  filter: (node: HTMLElement) => node.nodeName === "IMG" && /^data:image\//i.test(node.getAttribute("src") || ""),
+  replacement: (_content, node: HTMLElement) => node.outerHTML,
+});
+
+turndown.addRule("video", {
+  filter: "video",
+  replacement: (_c, node: any) => `\n[video](${node.getAttribute("src") || ""})\n`,
+});
+
+turndown.addRule("audio", {
+  filter: "audio",
+  replacement: (_c, node: any) => `\n[audio](${node.getAttribute("src") || ""})\n`,
+});
+
+turndown.addRule("taskItem", {
+  filter: (node: HTMLElement) => {
+    return node.nodeName === "LI" && (node.getAttribute("data-type") === "taskItem" || node.classList?.contains("task-list-item"));
+  },
+  replacement: (content: string, node: any) => {
+    const isChecked = node.getAttribute("data-checked") === "true" || Boolean(node.querySelector?.("input[type='checkbox']")?.checked);
+    const cleanContent = (content || "").trim().replace(/^\[[ xX]\]\s*/, "");
+    return `- [${isChecked ? "x" : " "}] ${cleanContent}\n`;
+  },
+});
+
+export function htmlToMarkdown(html: string): string {
+  if (!html) return "";
+  return turndown.turndown(html);
+}
+
+/** Older notes stored editor HTML. Parsing that as Markdown can stall the page. */
+export function editorHtmlFromStored(stored: string): string {
+  if (!stored) return "";
+  const trimmed = normalizeNoteMarkup(stored).trim();
+  if (trimmed.startsWith("<") && /<\/[a-z][a-z0-9]*>/i.test(trimmed)) return trimmed;
+  try {
+    return markdownToHtml(stored);
+  } catch {
+    return "";
+  }
+}
+
+export function markdownToHtml(md: string): string {
+  if (!md) return "";
+  let html = marked.parse(normalizeLegacyBase64Images(normalizeNoteMarkup(md)), { async: false }) as string;
+  // Convert standard markdown task items to TipTap-compatible task items
+  // Already serialized TipTap checklists must pass through unchanged. Rewrapping
+  // their existing labels/items creates invalid nested list markup in old notes.
+  if (!/data-type=["']taskItem["']/i.test(html)) {
+    html = html.replace(
+      /<li(?:\s+class="task-list-item")?>\s*(<input[^>]*type="checkbox"[^>]*>)?([\s\S]*?)<\/li>/gi,
+      (match, input, text) => {
+        if (!input && !match.includes("task-list-item")) return match;
+        const isChecked = Boolean(input && input.includes("checked"));
+        const clean = (text || "").trim();
+        return `<li data-type="taskItem" data-checked="${isChecked ? "true" : "false"}"><label><input type="checkbox" ${isChecked ? 'checked="checked"' : ''}><span></span></label><div>${clean}</div></li>`;
+      }
+    );
+  }
+  if (html.includes('data-type="taskItem"')) {
+    html = html.replace(/<ul>(\s*<li data-type="taskItem")/gi, '<ul data-type="taskList">$1');
+  }
+  return html;
+}

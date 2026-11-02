@@ -1,0 +1,89 @@
+import type { Task } from "@/lib/taskTypes";
+
+export type TaskChildrenMap = Record<string, Task[]>;
+
+export function buildTaskChildrenMap(tasks: Task[]): TaskChildrenMap {
+  const children: TaskChildrenMap = {};
+  for (const task of tasks) {
+    if (task.parent_id) (children[task.parent_id] ||= []).push(task);
+  }
+  return children;
+}
+
+export function collectTaskDescendantIds(
+  rootId: string,
+  childrenMap: TaskChildrenMap,
+): string[] {
+  const result: string[] = [];
+  const visited = new Set<string>();
+  const visit = (id: string) => {
+    if (visited.has(id)) return;
+    visited.add(id);
+    result.push(id);
+    for (const child of childrenMap[id] || []) visit(child.id);
+  };
+  visit(rootId);
+  return result;
+}
+
+export function getTaskProgress(
+  taskId: string,
+  childrenMap: TaskChildrenMap,
+): { done: number; total: number } {
+  let done = 0;
+  let total = 0;
+  const visited = new Set<string>();
+
+  const visit = (id: string, self: Task | null = null, isRoot = false) => {
+    if (visited.has(id)) return;
+    visited.add(id);
+    const allChildren = childrenMap[id] || [];
+    const activeChildren = allChildren.filter((child) => child.status !== "wont_do");
+    const unseenChildren = activeChildren.filter((child) => !visited.has(child.id));
+    if (!unseenChildren.length) {
+      // A parent with descendants remains a grouping row even when every
+      // child was set aside or malformed data closes a cycle.
+      if (!isRoot && self && self.status !== "wont_do" && allChildren.length === 0) {
+        total += 1;
+        if (self.completed || self.status === "done") done += 1;
+      }
+      return;
+    }
+    // A parent with descendants is a grouping row, not an additional unit of work.
+    for (const child of unseenChildren) visit(child.id, child);
+  };
+
+  visit(taskId, null, true);
+  return { done, total };
+}
+
+/**
+ * Determines whether a task should be promoted to the top-level list in a date-scoped view.
+ * A task is top-level if:
+ * 1. It matches the scope criteria (e.g., date matches today/tomorrow/next7).
+ * 2. Either it has no parent_id (it's a root task), OR its parent task is NOT in the scope.
+ *
+ * If its parent IS also in the scope, the child is nested hierarchically inside the parent.
+ * If its parent is NOT in the scope (undated, different date, or missing), the child must
+ * appear as a standalone root item so it is never hidden or lost.
+ */
+export function isStandaloneTaskForScope(
+  task: Task,
+  isTaskInScope: (task: Task) => boolean,
+  taskMap: Map<string, Task> | Record<string, Task>,
+): boolean {
+  if (!isTaskInScope(task)) return false;
+  if (!task.parent_id) return true;
+
+  const parent = taskMap instanceof Map ? taskMap.get(task.parent_id) : taskMap[task.parent_id];
+  if (!parent) return true;
+  return !isTaskInScope(parent);
+}
+
+/** Folder roots own their descendants even when children have no folder_id. */
+export function getFolderTaskTree(tasks: Task[], folderId: string): Task[] {
+  const children = buildTaskChildrenMap(tasks);
+  const ids = new Set(tasks.filter(task => !task.parent_id && task.folder_id === folderId)
+    .flatMap(task => collectTaskDescendantIds(task.id, children)));
+  return tasks.filter(task => ids.has(task.id));
+}

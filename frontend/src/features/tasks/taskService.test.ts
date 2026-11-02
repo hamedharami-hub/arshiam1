@@ -1,0 +1,440 @@
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { getDocs } from "firebase/firestore";
+import type { Task } from "@/lib/taskTypes";
+import { extractTasksFromCache } from "./taskCache";
+
+const mocks = vi.hoisted(() => ({
+  cache: new Map<string, unknown>(),
+  cacheGet: vi.fn(async (key: string) => mocks.cache.get(key)),
+  cacheSet: vi.fn(async (key: string, value: unknown) => { mocks.cache.set(key, value); }),
+  enqueueOps: vi.fn(),
+  canReplayForOwner: (operation: { ownerId?: string; payload?: unknown; match?: Record<string, unknown> }, userId?: string) => {
+    if (!userId) return false;
+    const payload = operation.payload && typeof operation.payload === "object"
+      ? operation.payload as Record<string, unknown>
+      : undefined;
+    const claims = [operation.ownerId, payload?.user_id, payload?.userId, operation.match?.user_id]
+      .filter((value): value is string => typeof value === "string" && value.length > 0);
+    return claims.length > 0 && claims.every((claim) => claim === userId);
+  },
+  writeBatch: vi.fn(),
+  doc: vi.fn((...args: unknown[]) => args),
+  syncAndroidWidget: vi.fn(),
+  taskKnowledgeLinks: [] as Array<{ id: string; user_id: string; task_id: string }>,
+  noteTaskLinks: [] as Array<{ id: string; user_id: string; task_id: string; note_id: string }>,
+  taskKnowledgeLinkReadError: false,
+  relationFromCache: false,
+  taskTags: [] as Array<Record<string, unknown>>,
+  select: vi.fn(),
+  getPendingOps: vi.fn().mockResolvedValue([]),
+  subscribeTasks: vi.fn(),
+}));
+
+vi.mock("firebase/firestore", () => ({
+  collection: vi.fn(),
+  getDocs: vi.fn(),
+  doc: mocks.doc,
+  writeBatch: mocks.writeBatch,
+}));
+vi.mock("@/lib/firebase", () => ({ db: {} }));
+vi.mock("@/lib/firebaseStore", () => ({
+  firebaseStore: {
+    from: vi.fn((table: string) => ({
+      select: (...args: unknown[]) => { mocks.select(...args); return ({
+        eq: () => ({
+          in: async () => ({
+            data: mocks.taskKnowledgeLinkReadError ? null :
+              table === "task_knowledge_links" ? mocks.taskKnowledgeLinks :
+                table === "note_task_links" ? mocks.noteTaskLinks : mocks.taskTags,
+            error: mocks.taskKnowledgeLinkReadError ? new Error("read failed") : null,
+            fromCache: mocks.relationFromCache,
+          }),
+        }),
+      }); },
+      delete: () => ({ in: vi.fn().mockResolvedValue({ data: [], error: null }) }),
+    })),
+  },
+}));
+vi.mock("@/lib/offlineQueue", () => ({
+  cacheGet: (...args: unknown[]) => mocks.cacheGet(...args as [string]),
+  cacheSet: (...args: unknown[]) => mocks.cacheSet(...args as [string, unknown]),
+  enqueueOps: mocks.enqueueOps,
+  canReplayForOwner: mocks.canReplayForOwner,
+  getPendingOps: mocks.getPendingOps,
+}));
+vi.mock("@/lib/firestoreDataService", () => ({
+  subscribeTasks: mocks.subscribeTasks,
+  upsertTask: vi.fn(),
+}));
+vi.mock("@/lib/androidWidget", () => ({ syncAndroidWidget: mocks.syncAndroidWidget }));
+vi.mock("@/lib/noteTaskLinkService", () => ({
+  deleteNoteTaskLinksFor: vi.fn().mockResolvedValue(true),
+  removeNoteTaskLinksFromCache: vi.fn().mockResolvedValue(undefined),
+}));
+
+import {
+  applyPendingTaskOperations,
+  deleteTaskCascade,
+  getCachedTasks,
+  fetchTasks,
+  hasServerAuthoritativeTasks,
+  subscribeToTasks,
+  taskMemoryCache,
+} from "./taskService";
+
+const task = (id: string, parent_id: string | null = null): Task => ({
+  id,
+  user_id: "task-owner",
+  title: id,
+  parent_id,
+  completed: false,
+  status: "todo",
+  description: null,
+  priority: "none",
+  due_date: null,
+  folder_id: null,
+  reminder_at: null,
+  recurrence: "none",
+  recurrence_rule: null,
+  pinned: false,
+  
+  
+  
+  position: 0,
+});
+
+const serverSnapshot = (tasks: Task[]) => ({
+  metadata: { fromCache: false, hasPendingWrites: false },
+  docs: tasks.map((item) => ({ id: item.id, data: () => item })),
+});
+
+describe("taskService cascade deletion persistence", () => {
+  const originalTasks = [task("root"), task("child", "root"), task("other")];
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mocks.cache.clear();
+    taskMemoryCache.clear();
+    taskMemoryCache.set("task-owner", originalTasks);
+    mocks.cache.set("tasks:all:task-owner", originalTasks);
+    Object.defineProperty(navigator, "onLine", { configurable: true, value: false });
+    mocks.enqueueOps.mockResolvedValue(true);
+    mocks.taskKnowledgeLinks = [];
+    mocks.noteTaskLinks = [];
+    mocks.taskKnowledgeLinkReadError = false;
+    mocks.relationFromCache = false;
+    mocks.taskTags = [];
+    mocks.getPendingOps.mockResolvedValue([]);
+    mocks.syncAndroidWidget.mockResolvedValue(undefined);
+    mocks.writeBatch.mockReturnValue({
+      delete: vi.fn(),
+      commit: vi.fn().mockResolvedValue(undefined),
+    });
+  });
+
+  afterEach(() => {
+    taskMemoryCache.clear();
+    vi.restoreAllMocks();
+  });
+
+  it("does not hide tasks or claim success when the offline cascade cannot be queued", async () => {
+    mocks.enqueueOps.mockResolvedValue(false);
+
+    const result = await deleteTaskCascade("task-owner", "root", originalTasks);
+
+    expect(result).toEqual({ success: false, deletedIds: [] });
+    expect(mocks.enqueueOps).toHaveBeenCalledWith([
+      { ownerId: "task-owner", table: "tasks", op: "delete", match: { id: "root" }, expectedRevision: undefined },
+      { ownerId: "task-owner", table: "task_tags", op: "delete", match: { task_id: "root" } },
+      { ownerId: "task-owner", table: "task_knowledge_links", op: "delete", match: { task_id: "root" } },
+      { ownerId: "task-owner", table: "note_task_links", op: "delete", match: { user_id: "task-owner", task_id: "root" } },
+      { ownerId: "task-owner", table: "tasks", op: "delete", match: { id: "child" }, expectedRevision: undefined },
+      { ownerId: "task-owner", table: "task_tags", op: "delete", match: { task_id: "child" } },
+      { ownerId: "task-owner", table: "task_knowledge_links", op: "delete", match: { task_id: "child" } },
+      { ownerId: "task-owner", table: "note_task_links", op: "delete", match: { user_id: "task-owner", task_id: "child" } },
+    ]);
+    expect(taskMemoryCache.get("task-owner")).toEqual(originalTasks);
+    expect(mocks.cacheSet).not.toHaveBeenCalled();
+  });
+
+  it("refuses recoverable deletion offline instead of promising a partial cached graph", async () => {
+    expect(await deleteTaskCascade("task-owner", "root", originalTasks, { recoverable: true }))
+      .toEqual({ success: false, deletedIds: [] });
+    expect(mocks.enqueueOps).not.toHaveBeenCalled();
+    expect(mocks.cacheSet).not.toHaveBeenCalled();
+  });
+
+  it.each(["error", "cache"])("aborts recoverable deletion on a relation snapshot %s", async (failure) => {
+    Object.defineProperty(navigator, "onLine", { configurable: true, value: true });
+    vi.mocked(getDocs).mockResolvedValueOnce(serverSnapshot(originalTasks) as any);
+    mocks.taskKnowledgeLinkReadError = failure === "error";
+    mocks.relationFromCache = failure === "cache";
+    expect(await deleteTaskCascade("task-owner", "root", originalTasks, { recoverable: true }))
+      .toEqual({ success: false, deletedIds: [] });
+    expect(mocks.enqueueOps).not.toHaveBeenCalled();
+    expect(mocks.writeBatch).not.toHaveBeenCalled();
+    expect(mocks.cacheSet).not.toHaveBeenCalled();
+    expect(taskMemoryCache.get("task-owner")).toEqual(originalTasks);
+  });
+
+  it("retains every relation field and requests server-only snapshots for recovery", async () => {
+    Object.defineProperty(navigator, "onLine", { configurable: true, value: true });
+    vi.mocked(getDocs).mockResolvedValueOnce(serverSnapshot(originalTasks) as any);
+    mocks.taskTags = [{ id: "tag-link", user_id: "task-owner", task_id: "root", tag_id: "tag", custom: "keep" }];
+    mocks.taskKnowledgeLinks = [{ id: "knowledge-link", user_id: "task-owner", task_id: "root", knowledge_id: "knowledge", relation_type: "reference", created_at: "date" } as any];
+    mocks.noteTaskLinks = [{ id: "note-link", user_id: "task-owner", task_id: "root", note_id: "note", created_at: "date", custom: "keep" } as any];
+    const result = await deleteTaskCascade("task-owner", "root", originalTasks, { recoverable: true });
+    expect(result.recovery).toEqual({ tasks: originalTasks.slice(0, 2), tagLinks: mocks.taskTags, knowledgeLinks: mocks.taskKnowledgeLinks, noteTaskLinks: mocks.noteTaskLinks });
+    expect(mocks.select).toHaveBeenCalledWith("*", { source: "server" });
+  });
+
+  it("refuses an incomplete recovery snapshot when affected relations have unsynced writes", async () => {
+    Object.defineProperty(navigator, "onLine", { configurable: true, value: true });
+    vi.mocked(getDocs).mockResolvedValueOnce(serverSnapshot(originalTasks) as any);
+    mocks.getPendingOps.mockImplementation(async (table: string) => table === "task_tags"
+      ? [{ ownerId: "task-owner", table, op: "insert", payload: { id: "local-link", task_id: "root" } }]
+      : []);
+    expect(await deleteTaskCascade("task-owner", "root", originalTasks, { recoverable: true }))
+      .toEqual({ success: false, deletedIds: [] });
+    expect(mocks.writeBatch).not.toHaveBeenCalled();
+    expect(mocks.enqueueOps).not.toHaveBeenCalled();
+  });
+
+  it("reloads a recently edited task from durable cache instead of stale memory", async () => {
+    const edited = { ...task("root"), priority: "high" as const, due_date: "2026-09-30T10:00:00.000Z" };
+    mocks.cache.set("tasks:all:task-owner", { tasks: [edited], cachedAt: Date.now() });
+
+    expect(await getCachedTasks("task-owner")).toEqual([edited]);
+    expect(taskMemoryCache.get("task-owner")).toEqual([edited]);
+  });
+
+  it("queues the full cascade before removing it from the offline task cache", async () => {
+    const result = await deleteTaskCascade("task-owner", "root", originalTasks);
+
+    expect(result).toEqual({ success: true, deletedIds: ["root", "child"] });
+    expect(taskMemoryCache.get("task-owner")).toEqual([task("other")]);
+    expect(mocks.cacheSet).toHaveBeenCalledTimes(3);
+  });
+
+  it("carries each task's observed revision into a queued cascade delete", async () => {
+    const versioned = [{ ...task("root"), updated_at: "2026-09-25T10:00:00.000Z" },
+      { ...task("child", "root"), updated_at: "2026-09-25T11:00:00.000Z" }];
+    await deleteTaskCascade("task-owner", "root", versioned);
+    expect(mocks.enqueueOps).toHaveBeenCalledWith(expect.arrayContaining([
+      expect.objectContaining({ table: "tasks", match: { id: "root" }, expectedRevision: versioned[0].updated_at }),
+      expect.objectContaining({ table: "tasks", match: { id: "child" }, expectedRevision: versioned[1].updated_at }),
+    ]));
+  });
+
+  it("deletes only parent_id descendants; goal and dependent action remain for an explicit missing-prerequisite decision", async () => {
+    const goal = task("goal");
+    const action = { ...task("action"), plan_parent_id: "goal" };
+    const dependent = { ...task("dependent"), prerequisite_ids: ["action"] };
+    const tasks = [goal, action, dependent];
+    taskMemoryCache.set("task-owner", tasks);
+    mocks.cache.set("tasks:all:task-owner", tasks);
+
+    const result = await deleteTaskCascade("task-owner", "action", tasks);
+
+    expect(result).toEqual({ success: true, deletedIds: ["action"] });
+    expect(taskMemoryCache.get("task-owner")).toEqual([goal, dependent]);
+    expect(mocks.enqueueOps).toHaveBeenCalledWith(expect.arrayContaining([
+      { ownerId: "task-owner", table: "tasks", op: "delete", match: { id: "action" }, expectedRevision: undefined },
+    ]));
+    expect(mocks.enqueueOps.mock.calls[0][0]).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({ table: "tasks", op: "delete", match: { id: "goal" } }),
+    ]));
+    expect(dependent.prerequisite_ids).toEqual(["action"]);
+  });
+
+  it("projects only queued task changes owned by the active account", async () => {
+    mocks.getPendingOps.mockResolvedValue([
+      { ownerId: "task-owner", table: "tasks", op: "upsert", payload: task("local"), match: { id: "local" } },
+      { ownerId: "another-owner", table: "tasks", op: "upsert", payload: task("foreign"), match: { id: "foreign" } },
+    ]);
+
+    await expect(applyPendingTaskOperations([task("remote")], "task-owner"))
+      .resolves.toEqual([task("local"), task("remote")]);
+  });
+
+  it("projects a legacy queued task only when its payload identifies this account", async () => {
+    mocks.getPendingOps.mockResolvedValue([
+      { table: "tasks", op: "upsert", payload: task("legacy"), match: { id: "legacy" } },
+      { table: "tasks", op: "upsert", payload: { ...task("foreign"), user_id: "other-owner" }, match: { id: "foreign" } },
+    ]);
+
+    await expect(applyPendingTaskOperations([task("remote")], "task-owner"))
+      .resolves.toEqual([task("legacy"), task("remote")]);
+  });
+
+  it("projects only this account's pending operations into realtime snapshots and ignores post-unsubscribe callbacks", async () => {
+    mocks.getPendingOps.mockResolvedValue([
+      { ownerId: "task-owner", table: "tasks", op: "delete", match: { id: "child" } },
+      { ownerId: "another-owner", table: "tasks", op: "upsert", payload: task("foreign"), match: { id: "foreign" } },
+    ]);
+    let emitSnapshot!: (tasks: Task[]) => void;
+    const firestoreUnsubscribe = vi.fn();
+    mocks.subscribeTasks.mockImplementationOnce((_userId: string, onUpdate: typeof emitSnapshot) => {
+      emitSnapshot = onUpdate;
+      return firestoreUnsubscribe;
+    });
+    const onUpdate = vi.fn();
+
+    const unsubscribe = subscribeToTasks("task-owner", onUpdate);
+    emitSnapshot(originalTasks);
+    await vi.waitFor(() => expect(onUpdate).toHaveBeenCalledOnce());
+    expect(onUpdate).toHaveBeenLastCalledWith([task("root"), task("other")]);
+
+    unsubscribe();
+    emitSnapshot([task("late-snapshot")]);
+    await Promise.resolve();
+    expect(onUpdate).toHaveBeenCalledOnce();
+    expect(firestoreUnsubscribe).toHaveBeenCalledOnce();
+  });
+
+  it("preserves a task added only to persistent cache while the cascade waits for its durable queue", async () => {
+    let resolveQueue!: (accepted: boolean) => void;
+    mocks.enqueueOps.mockImplementation(() => new Promise<boolean>((resolve) => {
+      resolveQueue = resolve;
+    }));
+
+    const deletion = deleteTaskCascade("task-owner", "root", originalTasks);
+    await vi.waitFor(() => expect(mocks.enqueueOps).toHaveBeenCalledOnce());
+    mocks.cache.set("tasks:all:task-owner", [...originalTasks, task("new-arrival")]);
+    resolveQueue(true);
+
+    expect(await deletion).toEqual({ success: true, deletedIds: ["root", "child"] });
+    expect(taskMemoryCache.get("task-owner")).toEqual([task("other"), task("new-arrival")]);
+    expect(extractTasksFromCache(mocks.cache.get("tasks:all:task-owner")))
+      .toEqual([task("other"), task("new-arrival")]);
+  });
+
+  it("uses an atomic Firestore batch for the online task portion", async () => {
+    Object.defineProperty(navigator, "onLine", { configurable: true, value: true });
+    vi.mocked(getDocs).mockResolvedValueOnce(serverSnapshot(originalTasks) as any);
+    mocks.taskKnowledgeLinks = [{ id: "link-child", user_id: "task-owner", task_id: "child" }];
+    mocks.noteTaskLinks = [{ id: "note-link-child", user_id: "task-owner", task_id: "child", note_id: "note-1" }];
+    const batch = { delete: vi.fn(), commit: vi.fn().mockResolvedValue(undefined) };
+    mocks.writeBatch.mockReturnValue(batch);
+
+    const result = await deleteTaskCascade("task-owner", "root", originalTasks);
+
+    expect(result.success).toBe(true);
+    expect(batch.delete).toHaveBeenCalledTimes(4);
+    expect(batch.delete).toHaveBeenCalledWith([{}, "users", "task-owner", "task_knowledge_links", "link-child"]);
+    expect(batch.delete).toHaveBeenCalledWith([{}, "users", "task-owner", "note_task_links", "note-link-child"]);
+    expect(batch.commit).toHaveBeenCalledOnce();
+    expect(mocks.enqueueOps).not.toHaveBeenCalled();
+  });
+
+  it("queues task-scoped relation cleanup when related links cannot be read online", async () => {
+    Object.defineProperty(navigator, "onLine", { configurable: true, value: true });
+    vi.mocked(getDocs).mockResolvedValueOnce(serverSnapshot(originalTasks) as any);
+    mocks.taskKnowledgeLinkReadError = true;
+
+    const result = await deleteTaskCascade("task-owner", "root", originalTasks);
+
+    expect(result).toEqual({ success: true, deletedIds: ["root", "child"] });
+    expect(mocks.enqueueOps).toHaveBeenCalledWith(expect.arrayContaining([
+      { ownerId: "task-owner", table: "task_knowledge_links", op: "delete", match: { task_id: "root" } },
+      { ownerId: "task-owner", table: "task_knowledge_links", op: "delete", match: { task_id: "child" } },
+    ]));
+    expect(mocks.writeBatch).not.toHaveBeenCalled();
+  });
+
+  it("does not claim an online cascade succeeded when Firestore and the durable queue both fail", async () => {
+    Object.defineProperty(navigator, "onLine", { configurable: true, value: true });
+    vi.mocked(getDocs).mockResolvedValueOnce(serverSnapshot(originalTasks) as any);
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const batch = { delete: vi.fn(), commit: vi.fn().mockRejectedValue(new Error("permission denied")) };
+    mocks.writeBatch.mockReturnValue(batch);
+    mocks.enqueueOps.mockResolvedValue(false);
+
+    const result = await deleteTaskCascade("task-owner", "root", originalTasks);
+
+    expect(result).toEqual({ success: false, deletedIds: [] });
+    expect(taskMemoryCache.get("task-owner")).toEqual(originalTasks);
+    expect(mocks.cacheSet).not.toHaveBeenCalled();
+  });
+
+  it("uses a server-confirmed descendant tree instead of a stale caller list", async () => {
+    Object.defineProperty(navigator, "onLine", { configurable: true, value: true });
+    const currentServerTasks = [task("root"), task("child", "root"), task("grandchild", "child"), task("other")];
+    vi.mocked(getDocs).mockResolvedValueOnce(serverSnapshot(currentServerTasks) as any);
+    const batch = { delete: vi.fn(), commit: vi.fn().mockResolvedValue(undefined) };
+    mocks.writeBatch.mockReturnValue(batch);
+
+    const result = await deleteTaskCascade("task-owner", "root", [task("root"), task("other")]);
+
+    expect(result).toEqual({ success: true, deletedIds: ["root", "child", "grandchild"] });
+    expect(batch.delete).toHaveBeenCalledWith([{}, "users", "task-owner", "tasks", "grandchild"]);
+  });
+
+  it("does not delete from an online cache-only task snapshot", async () => {
+    Object.defineProperty(navigator, "onLine", { configurable: true, value: true });
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    vi.mocked(getDocs).mockResolvedValueOnce({ ...serverSnapshot(originalTasks), metadata: { fromCache: true } } as any);
+
+    const result = await deleteTaskCascade("task-owner", "root", originalTasks);
+
+    expect(result).toEqual({ success: false, deletedIds: [] });
+    expect(mocks.enqueueOps).not.toHaveBeenCalled();
+    expect(mocks.writeBatch).not.toHaveBeenCalled();
+    expect(taskMemoryCache.get("task-owner")).toEqual(originalTasks);
+  });
+
+  it("does not delete from a snapshot with unconfirmed local writes", async () => {
+    Object.defineProperty(navigator, "onLine", { configurable: true, value: true });
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    vi.mocked(getDocs).mockResolvedValueOnce({ ...serverSnapshot(originalTasks), metadata: { fromCache: false, hasPendingWrites: true } } as any);
+
+    const result = await deleteTaskCascade("task-owner", "root", originalTasks);
+
+    expect(result).toEqual({ success: false, deletedIds: [] });
+    expect(mocks.enqueueOps).not.toHaveBeenCalled();
+    expect(mocks.writeBatch).not.toHaveBeenCalled();
+  });
+});
+
+describe("fetchTasks cache completeness", () => {
+  it("does not persist an older response after a newer fetch has finished", async () => {
+    const owner = "overlapping-fetch-owner";
+    Object.defineProperty(navigator, "onLine", { configurable: true, value: true });
+    mocks.getPendingOps.mockResolvedValue([]);
+    let resolveOlder!: (value: any) => void;
+    vi.mocked(getDocs)
+      .mockImplementationOnce(() => new Promise((resolve) => { resolveOlder = resolve; }))
+      .mockResolvedValueOnce({ metadata: { fromCache: false }, docs: [
+        { id: "new", data: () => task("new") },
+      ] } as any);
+
+    const older = fetchTasks(owner);
+    const newer = fetchTasks(owner);
+    expect((await newer).map((item) => item.id)).toEqual(["new"]);
+    resolveOlder({ metadata: { fromCache: false }, docs: [
+      { id: "old", data: () => task("old") },
+    ] });
+    await older;
+
+    expect((await getCachedTasks(owner)).map((item) => item.id)).toEqual(["new"]);
+    expect(mocks.syncAndroidWidget).toHaveBeenCalledTimes(1);
+    expect(mocks.syncAndroidWidget).toHaveBeenCalledWith([task("new")], owner);
+  });
+
+  it("preserves known tasks for an offline partial fetch and accepts an empty server list", async () => {
+    const owner = "offline-fetch-owner";
+    mocks.cache.set(`tasks:all:${owner}`, [task("known")]);
+    mocks.getPendingOps.mockResolvedValue([]);
+    vi.mocked(getDocs).mockResolvedValueOnce({ metadata: { fromCache: true }, docs: [] } as any);
+    expect((await fetchTasks(owner)).map(task => task.id)).toEqual(["known"]);
+    expect(hasServerAuthoritativeTasks(owner)).toBe(false);
+    Object.defineProperty(navigator, "onLine", { configurable: true, value: true });
+    vi.mocked(getDocs).mockResolvedValueOnce({ metadata: { fromCache: false }, docs: [] } as any);
+    expect(await fetchTasks(owner)).toEqual([]);
+    expect(hasServerAuthoritativeTasks(owner)).toBe(true);
+    Object.defineProperty(navigator, "onLine", { configurable: true, value: false });
+    vi.mocked(getDocs).mockRejectedValueOnce(new Error("offline"));
+    await fetchTasks(owner);
+    expect(hasServerAuthoritativeTasks(owner)).toBe(false);
+  });
+});

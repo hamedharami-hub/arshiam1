@@ -1,0 +1,687 @@
+import { HeaderTitlePortal } from "@/components/HeaderTitlePortal";
+import { VALUE_DOMAINS as DOMAINS } from "@/lib/valueDomains";
+import { useEffect, useRef, useState } from "react";
+import { toPersianDigits } from "@/lib/jalali";
+import { Link, useNavigate } from "react-router-dom";
+import { firebaseStore } from "@/lib/firebaseStore";
+import { useAuth } from "@/hooks/useAuth";
+import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
+import { Button } from "@/components/ui/button";
+import { Slider } from "@/components/ui/slider";
+import { Textarea } from "@/components/ui/textarea";
+import { Input } from "@/components/ui/input";
+import { Badge } from "@/components/ui/badge";
+import { Label } from "@/components/ui/label";
+import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "@/components/ui/alert-dialog";
+import {
+  ArrowRight,
+  ArrowLeft,
+  Check,
+  Cloud,
+  CloudOff,
+  Compass,
+  Loader2,
+  Plus,
+  RefreshCw,
+  Save,
+  Target,
+  Heart,
+  Trash2,
+  HelpCircle,
+  X,
+  Info,
+  Clock,
+} from "lucide-react";
+import { toast } from "sonner";
+import { useBilingual } from "@/hooks/useBilingual";
+import { createTaskFromMind } from "@/lib/taskFromMind";
+import {
+  subscribeMindValues,
+  saveMindValues,
+  subscribeMindGoals,
+  upsertMindGoal,
+  deleteMindGoal,
+  type MindGoalItem,
+} from "@/lib/firestoreDataService";
+
+// 10 life domains commonly used in ACT Values clarification.
+
+
+interface DomainState {
+  importance: number | null; // null = unspecified, NOT default 5!
+  consistency: number | null; // null = unspecified, NOT default 5! (Alignment over the past week)
+  value: string; // free text: what matters here
+  constraints?: string; // optional: constraints of time, energy, resources
+}
+
+interface Goal {
+  id: string;
+  domain: string;
+  text: string;
+  horizon?: "today" | "week" | "month" | "quarter" | "year";
+  created_at: string;
+}
+
+const STORAGE = (uid: string) => `mind_values_${uid}`;
+const GOALS_STORAGE = (uid: string) => `mind_goals_${uid}`;
+
+const HORIZONS = {
+  today: { label: "امروز", label_en: "Today", days: 0 },
+  week: { label: "این هفته", label_en: "This Week", days: 7 },
+  month: { label: "این ماه", label_en: "This Month", days: 30 },
+  quarter: { label: "این فصل", label_en: "This Season", days: 90 },
+  year: { label: "امسال", label_en: "This Year", days: 365 },
+};
+
+export default function ValuesGoalsView() {
+  const { user } = useAuth();
+  const uid = user?.id ?? null;
+  const navigate = useNavigate();
+  const { T, isEn } = useBilingual();
+  const BackIcon = isEn ? ArrowLeft : ArrowRight;
+
+  const [valuesEntry, setValuesEntry] = useState<{ uid: string | null; values: Record<string, DomainState> }>({ uid: null, values: {} });
+  const [goalsEntry, setGoalsEntry] = useState<{ uid: string | null; goals: Goal[] }>({ uid: null, goals: [] });
+  const state = valuesEntry.uid === uid ? valuesEntry.values : {};
+  const goals = goalsEntry.uid === uid ? goalsEntry.goals : [];
+  const setState = (values: Record<string, DomainState>) => setValuesEntry({ uid, values });
+  const setGoals = (next: Goal[]) => setGoalsEntry({ uid, goals: next });
+  const [loadState, setLoadState] = useState<{ uid: string | null; values: "loading" | "ready" | "error"; goals: "loading" | "ready" | "error" }>({ uid: null, values: "loading", goals: "loading" });
+  const loadValuesState = loadState.uid === uid ? loadState.values : "loading";
+  const loadGoalsState = loadState.uid === uid ? loadState.goals : "loading";
+  const [editingDomain, setEditingDomain] = useState<string | null>(null);
+  const [newGoal, setNewGoal] = useState({
+    domain: DOMAINS[0].key,
+    text: "",
+    horizon: "week" as Goal["horizon"],
+  });
+  const [valuesSync, setValuesSync] = useState<{ uid: string | null; status: "idle" | "device" | "syncing" | "synced" | "error" }>({ uid: null, status: "idle" });
+  const valuesSyncStatus = valuesSync.uid === uid ? valuesSync.status : "idle";
+  const [goalToDelete, setGoalToDelete] = useState<Goal | null>(null);
+  const ownerRef = useRef<string | null>(uid);
+  ownerRef.current = uid;
+  const valuesLatestRef = useRef<Record<string, DomainState> | null>(null);
+  const valuesDirtyRef = useRef(false);
+  const valuesLocalRef = useRef(false);
+  const valuesSyncTimer = useRef<number | null>(null);
+  const valuesQueueRef = useRef<Promise<unknown>>(Promise.resolve());
+
+  useEffect(() => {
+    // Never keep the previous account's values/goals on screen.
+    const ownerId = user?.id ?? null;
+    valuesLatestRef.current = null;
+    valuesDirtyRef.current = false;
+    valuesLocalRef.current = false;
+    setEditingDomain(null);
+    setValuesEntry({ uid: ownerId, values: {} });
+    setGoalsEntry({ uid: ownerId, goals: [] });
+    setLoadState({ uid: ownerId, values: ownerId ? "loading" : "ready", goals: ownerId ? "loading" : "ready" });
+    if (!ownerId) return;
+
+    // 1. Load from local cache
+    try {
+      const raw = localStorage.getItem(STORAGE(ownerId));
+      if (raw) {
+        const cachedValues = JSON.parse(raw);
+        if (cachedValues && typeof cachedValues === "object" && !Array.isArray(cachedValues)) setValuesEntry({ uid: ownerId, values: cachedValues });
+      }
+    } catch {}
+    try {
+      const raw = localStorage.getItem(GOALS_STORAGE(ownerId));
+      if (raw) {
+        const cachedGoals = JSON.parse(raw);
+        if (Array.isArray(cachedGoals)) setGoalsEntry({ uid: ownerId, goals: cachedGoals });
+      }
+    } catch {}
+
+    // 2. Subscribe to Firestore Values
+    const unsubValues = subscribeMindValues(ownerId, (cloudValues, meta) => {
+      if (ownerRef.current !== ownerId || valuesDirtyRef.current) return;
+      setValuesEntry({ uid: ownerId, values: cloudValues as Record<string, DomainState> });
+      try { localStorage.setItem(STORAGE(ownerId), JSON.stringify(cloudValues)); } catch {}
+      if (meta.source === "server") setLoadState((current) => current.uid === ownerId ? { ...current, values: "ready" } : current);
+      else if (meta.error) setLoadState((current) => current.uid === ownerId ? { ...current, values: "error" } : current);
+    }, () => setLoadState((current) => current.uid === ownerId ? { ...current, values: "error" } : current));
+
+    // 3. Subscribe to Firestore Goals
+    const unsubGoals = subscribeMindGoals(ownerId, (cloudGoals, meta) => {
+      if (ownerRef.current !== ownerId) return;
+      // An empty server answer is real: clear the screen and the local copy as well.
+      setGoalsEntry({ uid: ownerId, goals: cloudGoals as Goal[] });
+      try { localStorage.setItem(GOALS_STORAGE(ownerId), JSON.stringify(cloudGoals)); } catch {}
+      if (meta.source === "server" || cloudGoals.length > 0) {
+        setLoadState((current) => current.uid === ownerId ? { ...current, goals: "ready" } : current);
+      }
+    }, () => setLoadState((current) => current.uid === ownerId ? { ...current, goals: "error" } : current));
+
+    return () => {
+      if (valuesSyncTimer.current) { clearTimeout(valuesSyncTimer.current); valuesSyncTimer.current = null; }
+      if (valuesDirtyRef.current && valuesLatestRef.current) {
+        const pending = valuesLatestRef.current;
+        // Serialize the final write after in-flight writes; never label a fire-and-forget save as durable.
+        valuesQueueRef.current = valuesQueueRef.current.catch(() => undefined).then(async () => {
+          const ok = await Promise.resolve().then(() => saveMindValues(ownerId, pending)).catch(() => false);
+          if (!ok) console.warn("Values save did not complete; only a verified local copy can survive leaving.");
+        });
+      }
+      unsubValues();
+      unsubGoals();
+    };
+  }, [user?.id]);
+
+  // Values are written to this device immediately, then synced to the cloud on a
+  // short debounce so rapid typing/slider moves collapse into one write.
+  function scheduleValuesSync() {
+    if (valuesSyncTimer.current) clearTimeout(valuesSyncTimer.current);
+    valuesSyncTimer.current = window.setTimeout(() => {
+      valuesSyncTimer.current = null;
+      void flushValues();
+    }, 900);
+  }
+
+  async function flushValues() {
+    const owner = ownerRef.current;
+    const next = valuesLatestRef.current;
+    if (!owner || !next) return;
+    setValuesSync({ uid: owner, status: "syncing" });
+    const run = valuesQueueRef.current.catch(() => undefined).then(async () => {
+      const ok = await Promise.resolve().then(() => saveMindValues(owner, next)).catch(() => false);
+      if (ownerRef.current !== owner) return;
+      if (ok) {
+        // Only claim "Synced" if no newer edit is waiting.
+        if (valuesLatestRef.current === next) {
+          valuesDirtyRef.current = false;
+          setValuesSync({ uid: owner, status: "synced" });
+        }
+      } else if (valuesLatestRef.current === next) {
+        setValuesSync({ uid: owner, status: "error" });
+      }
+    });
+    valuesQueueRef.current = run;
+  }
+
+  function retryValuesSync() {
+    if (!valuesLatestRef.current) return;
+    valuesLocalRef.current = retainValues(ownerRef.current, valuesLatestRef.current);
+    valuesDirtyRef.current = true;
+    void flushValues();
+  }
+
+  function persist(next: Record<string, DomainState>) {
+    setState(next);
+    valuesLatestRef.current = next;
+    const owner = ownerRef.current;
+    if (!owner) return;
+    valuesLocalRef.current = retainValues(owner, next);
+    valuesDirtyRef.current = true;
+    setValuesSync({ uid: owner, status: valuesLocalRef.current ? "device" : "error" });
+    scheduleValuesSync();
+  }
+
+  function retainValues(owner: string | null, next: Record<string, DomainState>): boolean {
+    if (!owner) return false;
+    try {
+      const serialized = JSON.stringify(next);
+      localStorage.setItem(STORAGE(owner), serialized);
+      return localStorage.getItem(STORAGE(owner)) === serialized;
+    } catch { return false; }
+  }
+
+  function update(key: string, patch: Partial<DomainState>) {
+    const cur = state[key] || { importance: null, consistency: null, value: "", constraints: "" };
+    persist({ ...state, [key]: { ...cur, ...patch } });
+  }
+
+  // Reflection Areas: where both importance & consistency are rated and importance > consistency
+  const reflectionAreas = DOMAINS.map((d) => {
+    const s = state[d.key];
+    const hasScores = s && s.importance != null && s.consistency != null;
+    const gap = hasScores ? s.importance! - s.consistency! : null;
+    return {
+      ...d,
+      state: s,
+      hasScores,
+      gap,
+    };
+  })
+    .filter((d) => d.hasScores && d.gap !== null && d.gap > 0)
+    .sort((a, b) => (b.gap ?? 0) - (a.gap ?? 0));
+
+  async function addGoal() {
+    if (!user || !newGoal.text.trim()) {
+      toast.error(T("متن هدف را بنویس", "Please enter goal text"));
+      return;
+    }
+    const item: Goal = {
+      id: `goal_${Date.now()}`,
+      domain: newGoal.domain,
+      text: newGoal.text.trim(),
+      horizon: newGoal.horizon,
+      created_at: new Date().toISOString(),
+    };
+    const before = goals;
+    const next = [...goals, item];
+    setGoals(next);
+    try {
+      localStorage.setItem(GOALS_STORAGE(user.id), JSON.stringify(next));
+    } catch {}
+    const ok = await upsertMindGoal(user.id, item);
+    if (!ok) {
+      // Roll the optimistic insert back but keep the typed text for a retry.
+      setGoals(before);
+      try { localStorage.setItem(GOALS_STORAGE(user.id), JSON.stringify(before)); } catch {}
+      setNewGoal((current) => ({ ...current, text: item.text }));
+      toast.error(T("هدف ذخیره نشد؛ دوباره تلاش کن.", "Goal was not saved; please retry."));
+      return;
+    }
+    setNewGoal({ domain: DOMAINS[0].key, text: "", horizon: "week" });
+    toast.success(T("هدف ثبت شد ✨", "Goal saved ✨"));
+  }
+
+  async function removeGoal(id: string) {
+    if (!user) return;
+    const before = goals;
+    const next = goals.filter((g) => g.id !== id);
+    setGoals(next);
+    try {
+      localStorage.setItem(GOALS_STORAGE(user.id), JSON.stringify(next));
+    } catch {}
+    const ok = await deleteMindGoal(user.id, id);
+    if (!ok) {
+      setGoals(before);
+      try { localStorage.setItem(GOALS_STORAGE(user.id), JSON.stringify(before)); } catch {}
+      toast.error(T("هدف حذف نشد؛ دوباره تلاش کن.", "Goal was not deleted; please retry."));
+      return;
+    }
+    setGoalToDelete(null);
+    toast.success(T("هدف حذف شد", "Goal removed"));
+  }
+
+  // Bridge from a direction (goal) to a concrete first step in the task system.
+  async function planGoal(goal: Goal) {
+    if (!user) return;
+    const dueInDays = goal.horizon ? HORIZONS[goal.horizon]?.days : undefined;
+    const res = await createTaskFromMind({
+      user_id: user.id,
+      title: goal.text,
+      description: T(`گام اول برای هدف: ${goal.text}`, `First step toward: ${goal.text}`),
+      due_in_days: dueInDays,
+      source_type: "values_goal",
+      source_id: goal.id,
+      priority: "medium",
+    });
+    if (res?.ok) toast.success(T("گام اول به تسک‌ها اضافه شد", "First step added to your tasks"));
+    else toast.error(T("ساخت گام اول ناموفق بود؛ دوباره تلاش کن.", "Could not add the first step; please retry."));
+  }
+
+  return (
+    <div
+      dir={isEn ? "ltr" : "rtl"}
+      className="page-shell page-shell--lg space-y-6 animate-fade-in"
+    >
+      <Button variant="ghost" size="sm" onClick={() => navigate("/app/planning")}>
+        <BackIcon className={`w-4 h-4 ${isEn ? "me-1" : "ms-1"}`} /> {T("برنامه‌ریزی", "Planning")}
+      </Button>
+
+      {/* Header Banner */}
+      <div className="rounded-3xl p-6 bg-gradient-to-br from-emerald-500 via-teal-500 to-cyan-500 text-white shadow-md">
+        <div className="flex items-center gap-2 text-xs opacity-85 mb-1.5">
+          <Compass className="w-4 h-4" />
+          {T("قطب‌نمای ارزش‌ها و اهداف (ACT)", "Values & Goals Compass (ACT)")}
+        </div>
+        <HeaderTitlePortal title={T("شفاف‌سازی ارزش‌ها در ۱۰ حوزه زندگی", "Clarifying Core Values in 10 Life Domains")} />
+        <p className="text-sm opacity-90 leading-7">
+          {T(
+            "ارزش، جهت حرکت و کیفیت رفتار است (مثل قطب‌نما)؛ در حالی که هدف یا تسک، اقدامی مشخص و ملموس است (مثل مقصد). در این صفحه جهت را روشن کن و گام‌های همسو بردار.",
+            "Values are ongoing directions of living (like a compass); goals are specific destinations. Clarify your direction here and take aligned steps."
+          )}
+        </p>
+      </div>
+
+      {/* Distinction Note */}
+      <div className="p-3.5 rounded-xl bg-muted/40 border border-border/60 text-xs text-muted-foreground flex items-start gap-2.5">
+        <Info className="w-4 h-4 text-primary shrink-0 mt-0.5" />
+        <div className="leading-relaxed">
+          <strong className="text-foreground">
+            {T("تفکیک ارزش و اقدام: ", "Distinction between Value & Goal: ")}
+          </strong>
+          {T(
+            "ارزش‌ها پاسخ به «می‌خواهم چطور زندگی کنم؟» هستند و پایانی ندارند. نمرات اهمیت و همسویی بدون ورود شما «نامشخص» در نظر گرفته می‌شوند.",
+            "Values are answers to 'How do I want to show up in life?' and are never finished. Unanswered ratings remain 'Unspecified'."
+          )}
+        </div>
+      </div>
+
+      {/* Areas for Reflection */}
+      {reflectionAreas.length > 0 && (
+        <Card className="border-amber-500/30 bg-amber-500/5">
+          <CardHeader className="pb-2">
+            <CardTitle className="text-base flex items-center gap-2 text-amber-700 dark:text-amber-300">
+              <Compass className="w-4 h-4" />
+              {T("زمینه‌هایی برای تأمل (شکاف اهمیت و همسویی)", "Areas for Reflection (Importance vs Aligned Actions)")}
+            </CardTitle>
+            <CardDescription>
+              {T(
+                "در این حوزه‌ها، اهمیت بالاتری نسبت به میزان همسویی رفتار در هفته گذشته گزارش داده‌اید. اولویت‌بندی نهایی با شماست:",
+                "In these domains, reported importance is higher than behavioral alignment over the past week. You decide where to focus:"
+              )}
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-2">
+            {reflectionAreas.slice(0, 3).map((d) => (
+              <div
+                key={d.key}
+                className="p-3 rounded-xl bg-background border border-amber-500/20 flex items-center justify-between gap-3 text-xs"
+              >
+                <div className="flex items-center gap-2 font-semibold">
+                  <span className="text-base">{d.icon}</span>
+                  <span>{isEn ? d.label_en : d.label}</span>
+                </div>
+                <div className="flex items-center gap-3">
+                  <span className="text-muted-foreground">
+                    {isEn
+                      ? `Importance: ${d.state?.importance}/10 | Alignment (past week): ${d.state?.consistency}/10`
+                      : `اهمیت: ${toPersianDigits(d.state?.importance)}/۱۰ | همسویی (هفته قبل): ${toPersianDigits(d.state?.consistency)}/۱۰`}
+                  </span>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    className="h-7 text-xs"
+                    onClick={() => setEditingDomain(d.key)}
+                  >
+                    {T("تأمل و ویرایش", "Reflect & Edit")}
+                  </Button>
+                </div>
+              </div>
+            ))}
+          </CardContent>
+        </Card>
+      )}
+
+      {/* 10 Domains Grid */}
+      <div className="space-y-3">
+        <h2 className="text-lg font-bold">
+          {T("۱۰ حوزه زندگی برای شفاف‌سازی ارزش‌ها", "10 Life Domains")}
+        </h2>
+        {valuesSyncStatus !== "idle" && (
+          <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground" role="status" data-testid="values-sync-status">
+            {valuesSyncStatus === "syncing" ? <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              : valuesSyncStatus === "synced" ? <Check className="h-3.5 w-3.5 text-emerald-500" />
+              : valuesSyncStatus === "error" ? <CloudOff className="h-3.5 w-3.5 text-destructive" />
+              : <Cloud className="h-3.5 w-3.5" />}
+            <span className={valuesSyncStatus === "error" ? "text-destructive" : undefined}>
+              {valuesSyncStatus === "syncing" ? T("در حال همگام‌سازی…", "Syncing…")
+                : valuesSyncStatus === "synced" ? T("همگام‌سازی شد", "Synced")
+                : valuesSyncStatus === "error" ? (valuesLocalRef.current
+                  ? T("همگام‌سازی نشد؛ تغییرات روی همین دستگاه محفوظ است.", "Not synced; your edits are kept on this device.")
+                  : T("ذخیره تأیید نشد؛ تغییرات فقط در این صفحه است. پیش از خروج دوباره تلاش کنید.", "Save not verified; edits are only on this page. Retry before leaving."))
+                : T("روی این دستگاه ذخیره شد", "Saved on this device")}
+            </span>
+            {valuesSyncStatus === "error" && (
+              <Button size="sm" variant="outline" className="h-6 gap-1 text-[11px]" onClick={retryValuesSync} data-testid="values-sync-retry">
+                <RefreshCw className="h-3 w-3" />{T("تلاش دوباره", "Retry")}
+              </Button>
+            )}
+          </div>
+        )}
+        {loadValuesState === "loading" && <p className="text-xs text-muted-foreground" role="status" data-testid="values-loading">{T("در حال همگام‌سازی ارزش‌ها…", "Syncing values…")}</p>}
+        {loadValuesState === "error" && <p className="text-xs text-destructive" role="status" data-testid="values-load-error">{T("همگام‌سازی ارزش‌ها انجام نشد؛ دادهٔ ذخیره‌شده حفظ شده است.", "Values could not sync; saved data is still available.")}</p>}
+        {loadValuesState === "ready" && Object.keys(state).length === 0 && <p className="text-xs text-muted-foreground" data-testid="values-empty">{T("هنوز ارزشی ثبت نشده است.", "No values saved yet.")}</p>}
+
+        <div className="grid gap-3 sm:grid-cols-2">
+          {DOMAINS.map((d) => {
+            const s = state[d.key];
+            const isEditing = editingDomain === d.key;
+
+            return (
+              <Card
+                key={d.key}
+                className={`transition-all ${
+                  isEditing ? "border-primary ring-1 ring-primary/30 sm:col-span-2" : "hover:border-primary/40"
+                }`}
+              >
+                <CardContent className="p-4 space-y-3">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-2 font-bold text-sm">
+                      <span className="text-lg">{d.icon}</span>
+                      <span>{isEn ? d.label_en : d.label}</span>
+                    </div>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className="h-7 text-xs"
+                      onClick={() => setEditingDomain(isEditing ? null : d.key)}
+                    >
+                      {isEditing ? T("بستن", "Close") : T("ویرایش / ثبت", "Edit / Rate")}
+                    </Button>
+                  </div>
+
+                  {s?.value && (
+                    <p className="text-xs text-muted-foreground italic leading-relaxed">
+                      «{s.value}»
+                    </p>
+                  )}
+
+                  <div className="flex items-center justify-between text-xs text-muted-foreground pt-1 border-t border-border/40">
+                    <span>
+                      {isEn ? "Importance: " : "اهمیت: "}
+                      <strong className="text-foreground">
+                        {s?.importance != null
+                          ? isEn
+                            ? `${s.importance}/10`
+                            : `${toPersianDigits(s.importance)}/۱۰`
+                          : T("نامشخص", "Unspecified")}
+                      </strong>
+                    </span>
+                    <span>
+                      {isEn ? "Alignment (past week): " : "همسویی (هفته گذشته): "}
+                      <strong className="text-foreground">
+                        {s?.consistency != null
+                          ? isEn
+                            ? `${s.consistency}/10`
+                            : `${toPersianDigits(s.consistency)}/۱۰`
+                          : T("نامشخص", "Unspecified")}
+                      </strong>
+                    </span>
+                  </div>
+
+                  {/* Expanded Edit Form */}
+                  {isEditing && (
+                    <div className="pt-3 border-t border-border/60 space-y-3.5 animate-fade-in">
+                      <div className="space-y-1.5">
+                        <Label className="text-xs font-semibold">
+                          {T("این حوزه برای تو چه معنایی دارد و چه ارزشی مدنظر داری؟", "What matters most to you in this domain?")}
+                        </Label>
+                        <Textarea
+                          rows={2}
+                          value={s?.value || ""}
+                          onChange={(e) => update(d.key, { value: e.target.value })}
+                          placeholder={T("ارزش اصلی مدنظر من در این حوزه...", "My core value here...")}
+                        />
+                      </div>
+
+                      {/* Importance Slider (starts at null) */}
+                      <div className="space-y-1.5">
+                        <div className="flex justify-between items-center text-xs">
+                          <Label className="text-muted-foreground">
+                            {T("میزان اهمیت برای تو (۰ تا ۱۰):", "Importance to you (0-10):")}
+                          </Label>
+                          <span className="font-mono font-bold">
+                            {s?.importance != null ? `${s.importance} / 10` : T("نامشخص", "Unspecified")}
+                          </span>
+                        </div>
+                        <Slider
+                          value={[s?.importance ?? 0]}
+                          max={10}
+                          step={1}
+                          onValueChange={(v) => update(d.key, { importance: v[0] })}
+                        />
+                      </div>
+
+                      {/* Consistency Slider (Alignment past week, starts at null) */}
+                      <div className="space-y-1.5">
+                        <div className="flex justify-between items-center text-xs">
+                          <Label className="text-muted-foreground">
+                            {T("میزان همسویی رفتارها با این ارزش در هفته گذشته (۰ تا ۱۰):", "Behavioral alignment over the past week (0-10):")}
+                          </Label>
+                          <span className="font-mono font-bold">
+                            {s?.consistency != null ? `${s.consistency} / 10` : T("نامشخص", "Unspecified")}
+                          </span>
+                        </div>
+                        <Slider
+                          value={[s?.consistency ?? 0]}
+                          max={10}
+                          step={1}
+                          onValueChange={(v) => update(d.key, { consistency: v[0] })}
+                        />
+                      </div>
+
+                      {/* Constraints note */}
+                      <div className="space-y-1.5">
+                        <Label className="text-xs text-muted-foreground">
+                          {T("محدودیت‌های زمان، انرژی یا منابع در این حوزه (اختیاری):", "Constraints: time, energy, or resources (optional):")}
+                        </Label>
+                        <Input
+                          value={s?.constraints || ""}
+                          onChange={(e) => update(d.key, { constraints: e.target.value })}
+                          placeholder={T("مثلاً: کمبود وقت به خاطر شیفت کاری...", "e.g. Limited time due to work shifts...")}
+                        />
+                      </div>
+
+                      <div className="flex justify-end pt-1">
+                        <Button
+                          size="sm"
+                          onClick={() => setEditingDomain(null)}
+                          data-testid={`values-done-${d.key}`}
+                        >
+                          {T("تکمیل و بستن", "Done")}
+                        </Button>
+                      </div>
+                    </div>
+                  )}
+                </CardContent>
+              </Card>
+            );
+          })}
+        </div>
+      </div>
+
+      {/* Goals Section */}
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-base flex items-center gap-2">
+            <Target className="w-4 h-4 text-primary" />
+            {T("اهداف جهت‌بخش منتهی به اقدام", "Actionable Directional Goals")}
+          </CardTitle>
+          <CardDescription>
+            {T("هدف، اقدامی مشخص و ملموس در راستای ارزش‌های بالاست:", "A goal is a concrete, actionable milestone aligned with your values:")}
+          </CardDescription>
+          <p className="mt-1 text-xs text-muted-foreground">
+            {T("می‌توانی هر هدف را به یک گام اول قابل انجام در تسک‌ها تبدیل کنی.", "You can turn any goal into a concrete first step in your tasks.")}
+          </p>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div className="flex flex-col sm:flex-row gap-2">
+            <select
+              value={newGoal.domain}
+              onChange={(e) => setNewGoal({ ...newGoal, domain: e.target.value })}
+              className="h-10 rounded-md border bg-background px-3 text-xs"
+            >
+              {DOMAINS.map((d) => (
+                <option key={d.key} value={d.key}>
+                  {d.icon} {isEn ? d.label_en : d.label}
+                </option>
+              ))}
+            </select>
+
+            <select
+              value={newGoal.horizon}
+              onChange={(e) => setNewGoal({ ...newGoal, horizon: e.target.value as any })}
+              className="h-10 rounded-md border bg-background px-3 text-xs"
+            >
+              {Object.entries(HORIZONS).map(([k, v]) => (
+                <option key={k} value={k}>
+                  {isEn ? v.label_en : v.label}
+                </option>
+              ))}
+            </select>
+
+            <Input
+              value={newGoal.text}
+              onChange={(e) => setNewGoal({ ...newGoal, text: e.target.value })}
+              placeholder={T("عنوان هدف مشخص...", "Actionable goal description...")}
+              className="flex-1 text-xs"
+            />
+
+            <Button onClick={addGoal} size="sm" className="shrink-0">
+              <Plus className="w-3.5 h-3.5 ms-1" />
+              {T("افزودن هدف", "Add Goal")}
+            </Button>
+          </div>
+
+          <div className="space-y-2 divide-y divide-border/40">
+            {loadGoalsState === "loading" && goals.length === 0 && <p className="py-2 text-xs text-muted-foreground" role="status" data-testid="values-goals-loading">{T("در حال بارگذاری هدف‌ها…", "Loading goals…")}</p>}
+            {loadGoalsState === "error" && goals.length === 0 && <p className="py-2 text-xs text-destructive" role="status" data-testid="values-goals-error">{T("هدف‌ها بارگذاری نشدند؛ اتصال را بررسی کن.", "Goals could not load; check your connection.")}</p>}
+            {loadGoalsState === "ready" && goals.length === 0 && <p className="py-2 text-xs text-muted-foreground" data-testid="values-goals-empty">{T("هنوز هدفی ثبت نشده است.", "No goals saved yet.")}</p>}
+            {goals.map((g) => {
+              const dom = DOMAINS.find((d) => d.key === g.domain);
+              const hor = g.horizon ? HORIZONS[g.horizon] : undefined;
+              return (
+                <div
+                  key={g.id}
+                  className="pt-2 flex items-center justify-between gap-2 text-xs"
+                >
+                  <div className="flex items-center gap-2">
+                    <span>{dom?.icon || "🎯"}</span>
+                    <Badge variant="outline" className="text-[10px]">
+                      {isEn ? hor?.label_en : hor?.label}
+                    </Badge>
+                    <span className="font-medium text-foreground">{g.text}</span>
+                  </div>
+                  <div className="flex items-center gap-1">
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className="h-6 gap-1 text-[11px] text-muted-foreground hover:text-foreground"
+                      onClick={() => void planGoal(g)}
+                      aria-label={T("برنامه‌ریزی این هدف و افزودن گام اول", "Plan this goal and add a first step")}
+                      data-testid={`values-goal-plan-${g.id}`}
+                    >
+                      <Target className="w-3.5 h-3.5" />
+                      {T("افزودن گام اول", "Add first step")}
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      className="h-6 w-6 text-muted-foreground hover:text-destructive"
+                      onClick={() => setGoalToDelete(g)}
+                      aria-label={T(`حذف هدف ${g.text}`, `Delete goal ${g.text}`)}
+                      data-testid={`values-goal-delete-${g.id}`}
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                    </Button>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </CardContent>
+      </Card>
+
+      <AlertDialog open={Boolean(goalToDelete)} onOpenChange={(open) => { if (!open) setGoalToDelete(null); }}>
+        <AlertDialogContent dir={isEn ? "ltr" : "rtl"} data-testid="values-goal-delete-dialog">
+          <AlertDialogHeader>
+            <AlertDialogTitle>{T("این هدف حذف شود؟", "Delete this goal?")}</AlertDialogTitle>
+            <AlertDialogDescription>
+              {goalToDelete ? T(`«${goalToDelete.text}» برای همیشه حذف می‌شود.`, `“${goalToDelete.text}” will be removed permanently.`) : ""}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel data-testid="values-goal-delete-cancel">{T("انصراف", "Cancel")}</AlertDialogCancel>
+            <AlertDialogAction data-testid="values-goal-delete-confirm" className="bg-destructive text-destructive-foreground hover:bg-destructive/90" onClick={(event) => { event.preventDefault(); if (goalToDelete) void removeGoal(goalToDelete.id); }}>{T("حذف", "Delete")}</AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+    </div>
+  );
+}

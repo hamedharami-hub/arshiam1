@@ -1,0 +1,455 @@
+import { HeaderTitlePortal } from "@/components/HeaderTitlePortal";
+import { DailyExtras } from "@/components/DailyExtras";
+import { taskWorkDate } from "@/lib/taskDate";
+import { useEffect, useMemo, useState } from "react";
+import { useNavigate, useSearchParams } from "react-router-dom";
+import { format, addMonths, subMonths, startOfWeek, endOfWeek, addWeeks, subWeeks, addDays, subDays } from "date-fns";
+import { ChevronLeft, ChevronRight, CheckCircle2, Filter, RotateCcw } from "lucide-react";
+import { firebaseStore } from "@/lib/firebaseStore";
+import { getCachedTasks } from "@/lib/firestoreDataService";
+import { useAuth } from "@/hooks/useAuth";
+import { Button } from "@/components/ui/button";
+import { Card } from "@/components/ui/card";
+import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
+import { getCalendarSystem, setCalendarSystem, formatDate, type CalendarSystem } from "@/lib/jalali";
+import { getHolidaysForRange, getOccasionSets, setOccasionSets, HOLIDAYS_EVENT, type Holiday, type OccasionSet } from "@/lib/holidays";
+import { HolidayList } from "@/components/calendar/HolidayList";
+import { getTimeSettings, periodFor, fromLocalISO } from "@/lib/timeHorizon";
+import { addMonths as jAddMonths } from "date-fns-jalali";
+import { getLocalDateString, parseTaskDueDate } from "@/lib/taskDate";
+import { filterTasksForVisibility, useShowCompletedTasks, setShowCompletedTasks } from "@/lib/completedTaskVisibility";
+import { useBilingual } from "@/hooks/useBilingual";
+import MonthGrid from "@/components/calendar/MonthGrid";
+import WeekView from "@/components/calendar/WeekView";
+import DayView from "@/components/calendar/DayView";
+import AgendaView from "@/components/calendar/AgendaView";
+import DayDetailSheet from "@/components/calendar/DayDetailSheet";
+
+import type { CalendarTask } from "@/components/calendar/CalendarTask";
+
+type ViewMode = "month" | "week" | "day" | "agenda";
+type CalendarFilterStatus = "all" | "todo" | "in_progress" | "waiting" | "done" | "wont_do";
+type CalendarFolder = { id: string; name: string };
+type CalendarTag = { id: string; name: string };
+const ALL_FILTER = "__all__";
+const UNFILED_FILTER = "__unfiled__";
+const EMPTY_TASKS: CalendarTask[] = [];
+const EMPTY_TASK_TAGS: Record<string, string[]> = {};
+const EMPTY_FOLDERS: CalendarFolder[] = [];
+const EMPTY_TAGS: CalendarTag[] = [];
+
+export function parseCalendarDate(value: string | null): Date | null {
+  if (!value || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return null;
+  const parsed = new Date(`${value}T00:00:00`);
+  return Number.isFinite(parsed.getTime()) && getLocalDateString(parsed) === value ? parsed : null;
+}
+
+export function parseCalendarView(value: string | null): ViewMode {
+  return value === "week" || value === "day" || value === "agenda" ? value : "month";
+}
+
+export default function CalendarView() {
+  const { user } = useAuth();
+  const nav = useNavigate();
+  const { T, isEn } = useBilingual();
+  const showCompletedTasks = useShowCompletedTasks();
+  const [searchParams, setSearchParams] = useSearchParams();
+  const [fallbackDate] = useState(() => new Date());
+  const dateKey = searchParams.get("date");
+  const date = useMemo(() => parseCalendarDate(dateKey) || fallbackDate, [dateKey, fallbackDate]);
+  const view = parseCalendarView(searchParams.get("view"));
+  const setCalendarLocation = (nextDate: Date, nextView: ViewMode) => {
+    const params = new URLSearchParams(searchParams);
+    params.set("date", getLocalDateString(nextDate));
+    params.set("view", nextView);
+    setSearchParams(params);
+  };
+  const setDate = (next: Date) => setCalendarLocation(next, view);
+  const setView = (next: ViewMode) => setCalendarLocation(date, next);
+  const [rawTasks, setRawTasks] = useState<any[]>(() => (user?.id ? getCachedTasks(user.id) || [] : []));
+  const [tasksOwnerId, setTasksOwnerId] = useState<string | null>(() => (user?.id && (getCachedTasks(user.id)?.length || 0) > 0 ? user.id : null));
+  const [folders, setFolders] = useState<CalendarFolder[]>([]);
+  const [tags, setTags] = useState<CalendarTag[]>([]);
+  const [taskTags, setTaskTags] = useState<Record<string, string[]>>({});
+  const [metadataOwnerId, setMetadataOwnerId] = useState<string | null>(null);
+  const [folderFilter, setFolderFilter] = useState(ALL_FILTER);
+  const [tagFilter, setTagFilter] = useState(ALL_FILTER);
+  const [statusFilter, setStatusFilter] = useState<CalendarFilterStatus>("all");
+  const [filtersOpen, setFiltersOpen] = useState(false);
+  const [holidays, setHolidays] = useState<Holiday[]>([]);
+  const [occasionSets, setSets] = useState<OccasionSet[]>(getOccasionSets);
+  const [system, setSystem] = useState<CalendarSystem>(getCalendarSystem());
+  const [refreshKey, setRefreshKey] = useState(0);
+
+  const [detailDate, setDetailDate] = useState<Date | null>(null);
+  const [detailHour, setDetailHour] = useState<number | null>(null);
+  const openDayDetail = (day: Date, hour: number | null = null) => { setDetailHour(hour); setDetailDate(new Date(day)); };
+
+  const activeRange = useMemo(() => {
+    let start: Date, end: Date;
+    const ts = { ...getTimeSettings(), calendar: system };
+    if (view === "month") { const mp = periodFor("month", date, ts); start = subDays(fromLocalISO(mp.start), 7); end = addDays(fromLocalISO(mp.end), 7); end.setHours(23, 59, 59, 999); }
+    else if (view === "week") { const wp = periodFor("week", date, ts); start = fromLocalISO(wp.start); end = fromLocalISO(wp.end); end.setHours(23, 59, 59, 999); }
+    else if (view === "day") { start = new Date(date); start.setHours(0,0,0,0); end = new Date(date); end.setHours(23,59,59,999); }
+    else {
+      const ap = periodFor("month", date, ts);
+      start = fromLocalISO(ap.start); end = fromLocalISO(ap.end); end.setHours(23, 59, 59, 999);
+    }
+    return { start, end, startTime: start.getTime(), endTime: end.getTime() };
+  }, [view, date, system]);
+
+  const currentTasks = useMemo(() => {
+    if (!user?.id || tasksOwnerId !== user.id) return EMPTY_TASKS;
+    const { startTime, endTime } = activeRange;
+    const matching: CalendarTask[] = [];
+    const seenIds = new Set<string>();
+    const isInRange = (value: string | null) => {
+      const parsedDate = value ? parseTaskDueDate(value) : null;
+      return !!parsedDate && parsedDate.getTime() >= startTime && parsedDate.getTime() <= endTime;
+    };
+    const sameCalendarDay = (first: string | null, second: string | null) => {
+      const firstDate = first ? parseTaskDueDate(first) : null;
+      const secondDate = second ? parseTaskDueDate(second) : null;
+      return !!firstDate && !!secondDate && getLocalDateString(firstDate) === getLocalDateString(secondDate);
+    };
+    for (const t of rawTasks) {
+      if (!t.id || seenIds.has(t.id)) continue;
+      const scheduledDate = taskWorkDate(t);
+      const deadlineDate = typeof t.deadline_date === "string" ? t.deadline_date : null;
+      const scheduleInRange = isInRange(scheduledDate);
+      const deadlineInRange = isInRange(deadlineDate);
+      const entries: CalendarTask[] = [];
+      if (scheduleInRange && scheduledDate) {
+        const deadlineOnScheduledDay = deadlineDate && sameCalendarDay(scheduledDate, deadlineDate)
+          ? deadlineDate
+          : null;
+        entries.push({ ...t, due_date: scheduledDate, deadline_date: deadlineOnScheduledDay, calendar_kind: "schedule" });
+      }
+      if (deadlineInRange && deadlineDate && (!scheduleInRange || !sameCalendarDay(scheduledDate, deadlineDate))) {
+        entries.push({ ...t, due_date: deadlineDate, calendar_kind: "deadline" });
+      }
+      if (entries.length) {
+        seenIds.add(t.id);
+        matching.push(...entries);
+      }
+    }
+    return matching;
+  }, [rawTasks, tasksOwnerId, user?.id, activeRange]);
+  const currentTaskTags = metadataOwnerId === user?.id ? taskTags : EMPTY_TASK_TAGS;
+  const currentFolders = metadataOwnerId === user?.id ? folders : EMPTY_FOLDERS;
+  const currentTags = metadataOwnerId === user?.id ? tags : EMPTY_TAGS;
+
+  const visibleTasks = useMemo(() => filterTasksForVisibility(currentTasks, showCompletedTasks).filter((task) => {
+    if (folderFilter !== ALL_FILTER) {
+      if (folderFilter === UNFILED_FILTER ? Boolean(task.folder_id) : task.folder_id !== folderFilter) return false;
+    }
+    if (tagFilter !== ALL_FILTER && !(currentTaskTags[task.id] || task.tag_ids || []).includes(tagFilter)) return false;
+    if (statusFilter === "done") return task.completed === true || task.status === "done";
+    if (statusFilter === "todo" || statusFilter === "in_progress" || statusFilter === "waiting" || statusFilter === "wont_do") {
+      return task.status === statusFilter;
+    }
+    return true;
+  }), [currentTasks, showCompletedTasks, folderFilter, tagFilter, statusFilter, currentTaskTags]);
+
+  const activeFilterCount = Number(folderFilter !== ALL_FILTER) + Number(tagFilter !== ALL_FILTER) + Number(statusFilter !== "all");
+
+  // Load only this account's folder, tag, and task-tag metadata. Selection state
+  // stays in this page while switching calendar views.
+  useEffect(() => {
+    setMetadataOwnerId(user?.id || null);
+    setFolders([]);
+    setTags([]);
+    setTaskTags({});
+    setFolderFilter(ALL_FILTER);
+    setTagFilter(ALL_FILTER);
+    setStatusFilter("all");
+    if (!user?.id) {
+      return;
+    }
+    let active = true;
+    const loadMetadata = async () => {
+      const [folderResult, tagResult, taskTagResult] = await Promise.allSettled([
+        firebaseStore.from("folders").select("id,name").eq("user_id", user.id).order("name"),
+        firebaseStore.from("tags").select("id,name").eq("user_id", user.id).order("name"),
+        firebaseStore.from("task_tags").select("task_id,tag_id").eq("user_id", user.id),
+      ]);
+      if (!active) return;
+      if (folderResult.status === "fulfilled") setFolders((folderResult.value.data || []) as CalendarFolder[]);
+      if (tagResult.status === "fulfilled") setTags((tagResult.value.data || []) as CalendarTag[]);
+      if (taskTagResult.status === "fulfilled") {
+        const mapping: Record<string, string[]> = {};
+        for (const row of (taskTagResult.value.data || []) as { task_id: string; tag_id: string }[]) {
+          if (!row.task_id || !row.tag_id) continue;
+          (mapping[row.task_id] ||= []).push(row.tag_id);
+        }
+        setTaskTags(mapping);
+      }
+    };
+    void loadMetadata();
+    const refresh = () => { void loadMetadata(); };
+    window.addEventListener("tasks-changed", refresh);
+    window.addEventListener("task-tags-changed", refresh);
+    window.addEventListener("firebase-store-changed", refresh);
+    return () => {
+      active = false;
+      window.removeEventListener("tasks-changed", refresh);
+      window.removeEventListener("task-tags-changed", refresh);
+      window.removeEventListener("firebase-store-changed", refresh);
+    };
+  }, [user?.id]);
+
+
+
+  const persistSystem = (s: CalendarSystem) => { setCalendarSystem(s); setSystem(s); };
+
+  // Fetch tasks when user, view, or task store changes; date navigation uses in-memory rawTasks (0ms, 0 extra reads)
+  useEffect(() => {
+    if (!user) {
+      setRawTasks([]);
+      setTasksOwnerId(null);
+      return;
+    }
+    const ownerId = user.id;
+    setTasksOwnerId((prevOwner) => {
+      if (prevOwner !== ownerId) {
+        const cached = getCachedTasks(ownerId);
+        setRawTasks(cached && cached.length > 0 ? cached : []);
+      }
+      return ownerId;
+    });
+    let active = true;
+    firebaseStore.from("tasks").select("*").eq("user_id", ownerId)
+      .then(({ data }) => {
+        if (!active) return;
+        setRawTasks((data || []) as any[]);
+        setTasksOwnerId(ownerId);
+      });
+    return () => { active = false; };
+  }, [user, view, refreshKey]);
+
+  useEffect(() => {
+    if (!user) {
+      setHolidays([]);
+      return;
+    }
+    let active = true;
+    const { start, end } = activeRange;
+    getHolidaysForRange(subDays(start, 40), addDays(end, 40), occasionSets)
+      .then(value => { if (active) setHolidays(value); })
+      .catch(() => { if (active) setHolidays([]); });
+    return () => { active = false; };
+  }, [user, activeRange, occasionSets]);
+
+  useEffect(() => {
+    const refreshTasks = () => setRefreshKey(key => key + 1);
+    window.addEventListener("tasks-changed", refreshTasks);
+    window.addEventListener("firebase-store-changed", refreshTasks);
+    return () => {
+      window.removeEventListener("tasks-changed", refreshTasks);
+      window.removeEventListener("firebase-store-changed", refreshTasks);
+    };
+  }, []);
+
+  useEffect(() => {
+    const on = () => { setSets(getOccasionSets()); setRefreshKey((k) => k + 1); };
+    window.addEventListener(HOLIDAYS_EVENT, on);
+    return () => window.removeEventListener(HOLIDAYS_EVENT, on);
+  }, []);
+
+  const listPeriod = periodFor(view === "month" || view === "agenda" ? "month" : view === "week" ? "week" : "day", date, { ...getTimeSettings(), calendar: system });
+  const rangeHolidays = holidays.filter((h) => h.date >= listPeriod.start && h.date <= listPeriod.end);
+  const listTitle = view === "day" ? T("مناسبت‌های این روز", "Occasions today") : view === "week" ? T("مناسبت‌های این هفته", "Occasions this week") : T("مناسبت‌های این ماه", "Occasions this month");
+
+  const headerLabel = (() => {
+    if (view === "day") return system === "jalali" ? formatDate(date, "d MMMM yyyy", "jalali") : format(date, "MMMM d, yyyy");
+    if (view === "week") {
+      const wp = periodFor("week", date, { ...getTimeSettings(), calendar: system });
+      const s = fromLocalISO(wp.start), e = fromLocalISO(wp.end);
+      return system === "jalali"
+        ? `${formatDate(s, "d MMM", "jalali")} – ${formatDate(e, "d MMM", "jalali")}`
+        : `${format(s, "MMM d")} – ${format(e, "MMM d")}`;
+    }
+    return system === "jalali" ? formatDate(date, "MMMM yyyy", "jalali") : format(date, "MMMM yyyy");
+  })();
+
+  const altLabel = system === "jalali" ? format(date, "MMMM yyyy") : formatDate(date, "MMMM yyyy", "jalali");
+
+  const navigate = (dir: -1 | 1) => {
+    if (view === "month") setDate(system === "jalali" ? jAddMonths(date, dir) : dir < 0 ? subMonths(date, 1) : addMonths(date, 1));
+    else if (view === "week") setDate(dir < 0 ? subWeeks(date, 1) : addWeeks(date, 1));
+    else if (view === "day") setDate(dir < 0 ? subDays(date, 1) : addDays(date, 1));
+    else setDate(system === "jalali" ? jAddMonths(date, dir) : dir < 0 ? subMonths(date, 1) : addMonths(date, 1));
+  };
+
+  const PrevIcon = isEn ? ChevronLeft : ChevronRight;
+  const NextIcon = isEn ? ChevronRight : ChevronLeft;
+
+  return (
+    <div dir={isEn ? "ltr" : "rtl"} className="page-shell space-y-6 pb-safe-bottom page-enter">
+      <div className="flex items-start md:items-end justify-between gap-4 flex-wrap">
+        <div>
+          <HeaderTitlePortal title={headerLabel} />
+          <p className="text-xs md:text-sm text-muted-foreground mt-1">{altLabel}</p>
+        </div>
+        <div className="flex items-center gap-2 flex-wrap">
+          <Tabs dir={isEn ? "ltr" : "rtl"} value={system} onValueChange={(v) => persistSystem(v as CalendarSystem)}>
+            <TabsList className="h-10 bg-muted p-1">
+              <TabsTrigger value="jalali" className="text-xs h-8 rounded-md data-[state=active]:bg-background">
+                {T("شمسی", "Jalali")}
+              </TabsTrigger>
+              <TabsTrigger value="gregorian" className="text-xs h-8 rounded-md data-[state=active]:bg-background">
+                {T("میلادی", "Gregorian")}
+              </TabsTrigger>
+            </TabsList>
+          </Tabs>
+          <div className="flex items-center gap-1">
+            <Button size="icon" variant="ghost" className="h-10 w-10" onClick={() => navigate(-1)} title={T("قبلی", "Previous")}>
+              <PrevIcon className="w-4 h-4" />
+            </Button>
+            <Button size="sm" variant="secondary" onClick={() => setDate(new Date())}>
+              {T("امروز", "Today")}
+            </Button>
+            <Button size="icon" variant="ghost" className="h-10 w-10" onClick={() => navigate(1)} title={T("بعدی", "Next")}>
+              <NextIcon className="w-4 h-4" />
+            </Button>
+          </div>
+          <div className="flex items-center gap-1" role="group" aria-label={T("نمایش مناسبت‌ها", "Show occasions")} data-testid="calendar-occasion-sets">
+            {([["IR", T("ایران", "Iran")], ["AU", T("استرالیا", "Australia")]] as const).map(([code, label]) => {
+              const on = occasionSets.includes(code);
+              return (
+                <Button key={code} size="sm" variant={on ? "secondary" : "outline"} aria-pressed={on}
+                  className="h-9 gap-1.5 rounded-lg border border-border/60 text-xs"
+                  onClick={() => setOccasionSets(on ? occasionSets.filter((c) => c !== code) : [...occasionSets, code])}
+                  data-testid={`calendar-occasions-${code}`}>
+                  <span className={on ? "" : "text-muted-foreground line-through"}>{label}</span>
+                </Button>
+              );
+            })}
+          </div>
+          <Button
+            size="sm"
+            variant={showCompletedTasks ? "secondary" : "outline"}
+            className="h-9 text-xs gap-1.5 rounded-lg border border-border/60"
+            onClick={() => setShowCompletedTasks(!showCompletedTasks)}
+            title={showCompletedTasks ? T("مخفی‌سازی تسک‌های انجام‌شده", "Hide completed tasks") : T("نمایش تسک‌های انجام‌شده", "Show completed tasks")}
+            data-testid="calendar-toggle-completed"
+          >
+            <CheckCircle2 className={`w-3.5 h-3.5 ${showCompletedTasks ? "text-success" : "text-muted-foreground"}`} />
+            <span className="hidden sm:inline">{showCompletedTasks ? T("تکمیل‌شده‌ها", "Completed") : T("فقط بازها", "Open only")}</span>
+          </Button>
+          <Popover open={filtersOpen} onOpenChange={setFiltersOpen}>
+            <PopoverTrigger asChild>
+              <Button
+                size="icon"
+                variant={activeFilterCount ? "secondary" : "outline"}
+                className="relative h-9 w-9 rounded-lg border border-border/60"
+                aria-label={T("فیلترهای تقویم", "Calendar filters")}
+                aria-expanded={filtersOpen}
+                data-testid="calendar-open-filters"
+              >
+                <Filter className="h-4 w-4" />
+                {activeFilterCount > 0 && <span className="absolute -top-1 -end-1 min-w-4 h-4 rounded-full bg-primary text-primary-foreground text-[9px] leading-4 px-1">{activeFilterCount}</span>}
+              </Button>
+            </PopoverTrigger>
+            <PopoverContent align={isEn ? "end" : "start"} className="w-64 p-3 space-y-3" data-testid="calendar-filters">
+              <label className="block space-y-1 text-xs font-medium">
+                <span>{T("فولدر", "Folder")}</span>
+                <select aria-label={T("فیلتر فولدر", "Folder filter")} value={folderFilter} onChange={(event) => setFolderFilter(event.target.value)} className="h-9 w-full rounded-md border border-input bg-background px-2 text-sm font-normal">
+                  <option value={ALL_FILTER}>{T("همهٔ فولدرها", "All folders")}</option>
+                  <option value={UNFILED_FILTER}>{T("بدون فولدر", "Unfiled")}</option>
+                  {currentFolders.map((folder) => <option key={folder.id} value={folder.id}>{folder.name}</option>)}
+                </select>
+              </label>
+              <label className="block space-y-1 text-xs font-medium">
+                <span>{T("برچسب", "Tag")}</span>
+                <select aria-label={T("فیلتر برچسب", "Tag filter")} value={tagFilter} onChange={(event) => setTagFilter(event.target.value)} className="h-9 w-full rounded-md border border-input bg-background px-2 text-sm font-normal">
+                  <option value={ALL_FILTER}>{T("همهٔ برچسب‌ها", "All tags")}</option>
+                  {currentTags.map((tag) => <option key={tag.id} value={tag.id}>{tag.name}</option>)}
+                </select>
+              </label>
+              <label className="block space-y-1 text-xs font-medium">
+                <span>{T("وضعیت", "Status")}</span>
+                <select aria-label={T("فیلتر وضعیت", "Status filter")} value={statusFilter} onChange={(event) => setStatusFilter(event.target.value as CalendarFilterStatus)} className="h-9 w-full rounded-md border border-input bg-background px-2 text-sm font-normal">
+                  <option value="all">{T("همهٔ وضعیت‌ها", "All statuses")}</option>
+                  <option value="todo">{T("برای انجام", "To do")}</option>
+                  <option value="in_progress">{T("در حال انجام", "In progress")}</option>
+                  <option value="waiting">{T("در انتظار", "Waiting")}</option>
+                  <option value="done">{T("انجام‌شده", "Completed")}</option>
+                  <option value="wont_do">{T("انجام نمی‌شود", "Won't do")}</option>
+                </select>
+              </label>
+              {activeFilterCount > 0 && (
+                <Button type="button" size="sm" variant="ghost" className="h-8 w-full text-xs" onClick={() => { setFolderFilter(ALL_FILTER); setTagFilter(ALL_FILTER); setStatusFilter("all"); }}>
+                  <RotateCcw className="me-1.5 h-3.5 w-3.5" />{T("پاک‌کردن فیلترها", "Clear filters")}
+                </Button>
+              )}
+            </PopoverContent>
+          </Popover>
+        </div>
+      </div>
+
+      <Tabs dir={isEn ? "ltr" : "rtl"} value={view} onValueChange={(v) => setView(v as ViewMode)} className="space-y-4">
+        <TabsList className="bg-muted p-1 h-9">
+          <TabsTrigger value="month" className="text-xs rounded-md data-[state=active]:bg-background">
+            {T("ماهانه", "Month")}
+          </TabsTrigger>
+          <TabsTrigger value="week" className="text-xs rounded-md data-[state=active]:bg-background">
+            {T("هفتگی", "Week")}
+          </TabsTrigger>
+          <TabsTrigger value="day" className="text-xs rounded-md data-[state=active]:bg-background">
+            {T("روزانه", "Day")}
+          </TabsTrigger>
+          <TabsTrigger value="agenda" className="text-xs rounded-md data-[state=active]:bg-background">
+            {T("برنامه", "Agenda")}
+          </TabsTrigger>
+        </TabsList>
+
+        <TabsContent value="month">
+          <Card className="p-3 bg-card/60 border-border/60 shadow-sm">
+            <MonthGrid month={date} tasks={visibleTasks} holidays={holidays} system={system}
+
+              onDayClick={(d) => openDayDetail(d)} />
+          </Card>
+        </TabsContent>
+
+        <TabsContent value="week">
+          <Card className="p-3 bg-card/60 border-border/60 shadow-sm">
+            <WeekView date={date} tasks={visibleTasks} holidays={holidays} system={system}
+              onDayClick={(d) => setCalendarLocation(d, "day")}
+              onSlotClick={(d, hour) => openDayDetail(d, hour)} />
+          </Card>
+        </TabsContent>
+
+        <TabsContent value="day">
+          <Card className="p-4 bg-card/60 border-border/60 shadow-sm">
+            <DayView date={date} tasks={visibleTasks} system={system}
+              onSlotClick={(hour) => openDayDetail(date, hour)}
+              onTaskClick={(id) => nav(`/app/tasks/${id}`)} />
+          </Card>
+        </TabsContent>
+
+        <TabsContent value="agenda">
+          <Card className="p-4 bg-card/60 border-border/60 shadow-sm">
+            <AgendaView start={fromLocalISO(listPeriod.start)} end={fromLocalISO(listPeriod.end)} tasks={visibleTasks}
+              holidays={holidays} system={system} />
+          </Card>
+        </TabsContent>
+      </Tabs>
+
+      <DailyExtras isEn={isEn} calendarDate={getLocalDateString(date)} />
+      <HolidayList holidays={rangeHolidays} system={system} isEn={isEn} title={listTitle} />
+
+      <DayDetailSheet
+        date={detailDate}
+        initialHour={detailHour}
+        open={!!detailDate}
+        onOpenChange={(v) => !v && setDetailDate(null)}
+        tasks={visibleTasks}
+        holidays={holidays}
+        system={system}
+        onTaskCreated={() => setRefreshKey((k) => k + 1)}
+      />
+    </div>
+  );
+}

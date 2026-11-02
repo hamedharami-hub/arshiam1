@@ -1,0 +1,578 @@
+import { render, screen, fireEvent, waitFor, act, within } from "@testing-library/react";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { MemoryRouter, useLocation } from "react-router-dom";
+import type { Task } from "@/lib/taskTypes";
+import { getLocalDateString } from "@/lib/taskDate";
+import { updateTodayPlanning } from "@/lib/todayPlanning";
+
+const mockSetAllTasks = vi.fn();
+let mockTasks: Task[] = [];
+const actions = vi.hoisted(() => ({ persist: vi.fn(), advance: vi.fn() }));
+const focusMocks = vi.hoisted(() => ({
+  state: null as null | {
+    userId: string;
+    session: { startedAt: number | null; endAt: number | null; remaining: number; mode: "work" | "short" | "long"; taskId: string | null; taskTitle?: string };
+  },
+}));
+vi.mock("@/hooks/useFocusSession", () => ({ useFocusSession: () => focusMocks.state }));
+vi.mock("@/lib/firestoreDataService", async original => ({
+  ...await original<typeof import("@/lib/firestoreDataService")>(), persistTask: actions.persist,
+}));
+vi.mock("@/lib/recurringTaskService", async original => ({
+  ...await original<typeof import("@/lib/recurringTaskService")>(), advanceRecurringTask: actions.advance,
+}));
+
+vi.mock("@/hooks/useAuth", () => ({
+  useAuth: () => ({ user: { id: "user-123" } }),
+}));
+
+vi.mock("@/hooks/useBilingual", () => ({
+  useBilingual: () => ({ T: (fa: string, en: string) => en, isEn: true }),
+}));
+
+vi.mock("@/hooks/useDeviceFormFactor", () => ({
+  useDeviceFormFactor: () => ({ isPhone: false }),
+}));
+
+vi.mock("@/hooks/useTasksData", () => ({
+  useTasksData: () => ({
+    allTasks: mockTasks,
+    setAllTasks: mockSetAllTasks,
+    outcomeById: {},
+    outcomeByTaskId: {},
+    load: vi.fn(),
+  }),
+}));
+
+vi.mock("@/components/HeaderTitlePortal", () => ({
+  HeaderTitlePortal: ({ title, subtitle }: any) => (
+    <div data-testid="header-title-portal">
+      <span>{title}</span>
+      {subtitle && <span data-testid="header-subtitle">{subtitle}</span>}
+    </div>
+  ),
+}));
+
+vi.mock("@/components/QuickAddTask", () => ({
+  QuickAddTask: () => <div data-testid="quick-add-task" />,
+}));
+
+vi.mock("@/components/TaskDetail", () => ({
+  TaskDetail: ({ task, mode, onClose }: any) => (
+    <div data-testid="task-detail" data-mode={mode} data-task-id={task.id}>
+      <span>Detail: {task.title}</span>
+      <button onClick={onClose}>Close Detail</button>
+    </div>
+  ),
+}));
+
+import TodayDashboardView from "./TodayDashboardView";
+
+function LocationProbe() {
+  const location = useLocation();
+  return <output data-testid="location-probe">{location.pathname + location.search}</output>;
+}
+
+describe("TodayDashboardView visual and structural requirements", { timeout: 15000 }, () => {
+  const now = new Date();
+  const todayIso = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59).toISOString();
+  const yesterdayIso = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1, 12, 0).toISOString();
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    localStorage.clear();
+    actions.persist.mockReset().mockResolvedValue("saved");
+    actions.advance.mockReset().mockResolvedValue({ success: false, error: new Error("offline transaction") });
+  });
+  afterEach(() => vi.useRealTimers());
+
+  it("keeps a recurring task open when atomic advancement fails", async () => {
+    mockTasks = [{ id: "failed-repeat", user_id: "user-123", title: "Recurring task", completed: false, status: "todo", priority: "none", schedule_v: 2,
+      work_date: getLocalDateString(), recurrence: "daily" } as Task];
+    render(<MemoryRouter><TodayDashboardView /></MemoryRouter>);
+    fireEvent.click(screen.getByRole("checkbox"));
+    await waitFor(() => expect(actions.advance).toHaveBeenCalledTimes(1));
+    expect(actions.persist).not.toHaveBeenCalled();
+    expect(mockSetAllTasks).not.toHaveBeenCalled();
+  });
+
+  it("moves an exact-time task to overdue as the clock passes while the page stays open", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(2030, 2, 4, 12, 0));
+    mockTasks = [{ id: "clock-task", user_id: "user-123", title: "Clock task", completed: false, status: "todo", priority: "none", schedule_v: 2,
+      work_date: new Date(2030, 2, 4, 12, 1).toISOString() } as Task];
+    const { container } = render(<MemoryRouter><TodayDashboardView /></MemoryRouter>);
+    expect(screen.queryByText("Overdue")).toBeNull();
+    await act(async () => { vi.advanceTimersByTime(120000); });
+    expect(screen.getByText("Overdue")).toBeInTheDocument();
+    expect(screen.getByText("Clock task")).toBeInTheDocument();
+    expect(container.querySelectorAll(".swipe-row")).toHaveLength(1);
+  });
+
+  it("renders completed tasks by default and lets the completed control hide and restore them", () => {
+    mockTasks = [
+      {
+        id: "task-urgent",
+        user_id: "user-123",
+        title: "Urgent Meeting",
+        completed: false,
+        status: "todo",
+        priority: "urgent",
+        due_date: todayIso,
+        folder_id: null,
+        parent_id: null,
+      },
+      {
+        id: "task-regular",
+        user_id: "user-123",
+        title: "Regular Task",
+        completed: false,
+        status: "todo",
+        priority: "none",
+        due_date: todayIso,
+        folder_id: null,
+        parent_id: null,
+      },
+      {
+        id: "task-completed",
+        user_id: "user-123",
+        title: "Done Morning Walk",
+        completed: true,
+        status: "done",
+        priority: "low",
+        due_date: todayIso,
+        completed_at: new Date().toISOString(),
+        folder_id: null,
+        parent_id: null,
+      },
+      {
+        id: "task-overdue",
+        user_id: "user-123",
+        title: "Overdue Report",
+        completed: false,
+        status: "todo",
+        priority: "high",
+        due_date: yesterdayIso,
+        folder_id: null,
+        parent_id: null,
+      },
+    ];
+
+    render(
+      <MemoryRouter>
+        <TodayDashboardView />
+      </MemoryRouter>
+    );
+
+    // 1. Top priorities subtle section has accessible star icon, but no visible counter or big heading
+    expect(screen.queryByLabelText("Top Priorities")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("top-priorities")).not.toBeInTheDocument();
+    expect(screen.getByText("Urgent Meeting")).toBeInTheDocument();
+    expect(screen.queryByTestId("pharmacy-shortcuts")).not.toBeInTheDocument();
+    expect(screen.queryByText(/(\d)\/3/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/(\d)\/۳/)).not.toBeInTheDocument();
+
+    // 2. Regular active task
+    expect(screen.getByText("Regular Task")).toBeInTheDocument();
+
+    // 3. Unwanted text and persistent QuickAdd form must NOT exist
+    expect(screen.queryByText("Other tasks for today")).not.toBeInTheDocument();
+    expect(screen.queryByText("سایر تسک‌های امروز")).not.toBeInTheDocument();
+    expect(screen.queryByPlaceholderText(/Add a task for today|افزودن تسک برای امروز/i)).not.toBeInTheDocument();
+
+    // 4. Completed tasks toggle
+    const completedToggle = screen.getByRole("button", { name: /hide completed tasks/i });
+    expect(completedToggle).toBeInTheDocument();
+    expect(screen.getByText("Done Morning Walk")).toBeInTheDocument();
+
+    // Hide and restore completed tasks using the shared preference.
+    fireEvent.click(completedToggle);
+    expect(screen.queryByText("Done Morning Walk")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /show completed tasks/i }));
+    expect(screen.getByText("Done Morning Walk")).toBeInTheDocument();
+
+    // 5. Overdue section is present
+    expect(screen.getByText("Overdue")).toBeInTheDocument();
+    expect(screen.getByText("Overdue Report")).toBeInTheDocument();
+  });
+
+  it("opens the retained Knowledge source instead of completing an old review task", async () => {
+    mockTasks = [{
+      id: "review-task", title: "Review study cards", due_date: new Date().toISOString(),
+      completed: false, status: "todo", source_type: "leitner", source_id: "doc-7",
+    } as Task];
+    render(
+      <MemoryRouter initialEntries={["/app/today?completeTaskId=review-task"]}>
+        <LocationProbe />
+        <TodayDashboardView />
+      </MemoryRouter>,
+    );
+    await waitFor(() => expect(screen.getByTestId("location-probe")).toHaveTextContent(
+      "/app/recall?docId=doc-7",
+    ));
+    expect(mockSetAllTasks).not.toHaveBeenCalled();
+  });
+
+  it("uses the full list width until a task is selected and then opens its inspector", () => {
+    mockTasks = [
+      {
+        id: "task-1",
+        user_id: "user-123",
+        title: "Write documentation",
+        completed: false,
+        status: "todo",
+        priority: "high",
+        due_date: todayIso,
+        folder_id: null,
+        parent_id: null,
+      },
+    ];
+
+    const { container } = render(
+      <MemoryRouter>
+        <TodayDashboardView />
+      </MemoryRouter>
+    );
+
+    // The task list section has independent scrolling (overflow-y-auto and overscroll-contain)
+    const section = container.querySelector("section");
+    expect(section).toBeInTheDocument();
+    expect(container.querySelector("[data-task-split]")).toHaveAttribute("data-task-split", "false");
+
+    // No empty inspector consumes space before selection
+    expect(screen.queryByText("Select a task")).not.toBeInTheDocument();
+    expect(container.querySelector("aside")).not.toBeInTheDocument();
+
+    // Clicking a task selects it and renders embedded TaskDetail in the left panel
+    const taskTitle = screen.getByText("Write documentation");
+    fireEvent.click(taskTitle);
+
+    const detail = screen.getByTestId("task-detail");
+    expect(detail).toBeInTheDocument();
+    expect(detail.getAttribute("data-mode")).toBe("embedded");
+    expect(detail.getAttribute("data-task-id")).toBe("task-1");
+    expect(container.querySelector("section")?.className).toContain("overflow-y-auto");
+    expect(container.querySelector("[data-task-split]")).toHaveAttribute("data-task-split", "true");
+
+    // Closing the detail restores the full-width list
+    const closeBtn = screen.getByText("Close Detail");
+    fireEvent.click(closeBtn);
+    expect(screen.queryByTestId("task-detail")).not.toBeInTheDocument();
+    expect(screen.queryByText("Select a task")).not.toBeInTheDocument();
+  });
+
+  it("toggles split view off to single column and opens drawer when a task is selected", () => {
+    mockTasks = [
+      {
+        id: "task-2",
+        user_id: "user-123",
+        title: "Review pull request",
+        completed: false,
+        status: "todo",
+        priority: "none",
+        due_date: todayIso,
+        folder_id: null,
+        parent_id: null,
+      },
+    ];
+
+    const { container } = render(
+      <MemoryRouter>
+        <TodayDashboardView />
+      </MemoryRouter>
+    );
+
+    // Toggle split view off via the split view button
+    const toggleBtn = screen.getByTitle("Full width");
+    expect(toggleBtn).toBeInTheDocument();
+    fireEvent.click(toggleBtn);
+
+    // Split container is now single column (data-task-split="false")
+    expect(container.querySelector('[data-task-split="false"]')).toBeInTheDocument();
+    expect(screen.queryByText("Select a task")).not.toBeInTheDocument();
+
+    // In single column mode, the section does not constrain height or force independent overflow
+    const section = container.querySelector("section");
+    expect(section?.className).not.toContain("overflow-y-auto");
+
+    // Clicking the task in single-column mode opens TaskDetail with mode="drawer"
+    fireEvent.click(screen.getByText("Review pull request"));
+
+    const detail = screen.getByTestId("task-detail");
+    expect(detail).toBeInTheDocument();
+    expect(detail.getAttribute("data-mode")).toBe("drawer");
+    expect(detail.getAttribute("data-task-id")).toBe("task-2");
+  });
+
+  it("merges the date and split view controls into the header on wide screens and omits the separate second row", () => {
+    mockTasks = [
+      {
+        id: "task-10",
+        user_id: "user-123",
+        title: "Test merged header",
+        completed: false,
+        status: "todo",
+        priority: "high",
+        due_date: todayIso,
+        folder_id: null,
+        parent_id: null,
+      },
+    ];
+
+    const { container } = render(
+      <MemoryRouter>
+        <TodayDashboardView />
+      </MemoryRouter>
+    );
+
+    // Title and date are rendered in the header portal
+    const headerTitle = screen.getByTestId("header-title-portal");
+    expect(headerTitle).toBeInTheDocument();
+    expect(headerTitle).toHaveTextContent("Today");
+    const headerSubtitle = screen.getByTestId("header-subtitle");
+    expect(headerSubtitle).toBeInTheDocument();
+
+    // Split view toggle button is present in the header actions portal
+    const toggleBtn = screen.getByTitle("Full width");
+    expect(toggleBtn).toBeInTheDocument();
+
+    // A separate second row heading for date is NOT present on wide screens
+    // The h1 with date only exists in the mobile second row which should not be rendered
+    const h1Elements = container.querySelectorAll("h1");
+    expect(h1Elements.length).toBe(0);
+  });
+
+  it("merges the date into the header and omits full width button and second row on compact mobile screens", () => {
+    window.innerWidth = 390;
+    mockTasks = [];
+
+    const { container } = render(
+      <MemoryRouter>
+        <TodayDashboardView />
+      </MemoryRouter>
+    );
+
+    // On mobile, the portal subtitle now has the date directly merged
+    expect(screen.getByTestId("header-subtitle")).toBeInTheDocument();
+
+    // The date heading does NOT exist as a separate second row h1 on the page
+    const h1Elements = container.querySelectorAll("h1");
+    expect(h1Elements.length).toBe(0);
+
+    // The Full width / split view button is NOT rendered on mobile
+    expect(screen.queryByTitle("Full width")).not.toBeInTheDocument();
+  });
+
+  it("promotes and displays a child task scheduled for today when its parent has no due date", () => {
+    mockTasks = [
+      {
+        id: "parent-project",
+        user_id: "user-123",
+        title: "Big Overarching Project",
+        completed: false,
+        status: "todo",
+        priority: "none",
+        due_date: null,
+        folder_id: null,
+        parent_id: null,
+      },
+      {
+        id: "child-due-today",
+        user_id: "user-123",
+        title: "Child Subtask Due Today",
+        completed: false,
+        status: "todo",
+        priority: "high",
+        due_date: todayIso,
+        folder_id: null,
+        parent_id: "parent-project",
+      },
+    ];
+
+    render(
+      <MemoryRouter>
+        <TodayDashboardView />
+      </MemoryRouter>
+    );
+
+    // Child task is visible on today's dashboard!
+    expect(screen.getByText("Child Subtask Due Today")).toBeInTheDocument();
+
+    // The capsule chip badge indicating the parent task is also rendered!
+    expect(screen.getByTitle("View parent task")).toBeInTheDocument();
+    expect(screen.getByText("Big Overarching Project")).toBeInTheDocument();
+  });
+
+  it("separates due and overdue study items from ordinary tasks and priorities", () => {
+    mockTasks = [
+      {
+        id: "personal-urgent",
+        user_id: "user-123",
+        title: "Urgent personal task",
+        completed: false,
+        status: "todo",
+        priority: "urgent",
+        due_date: todayIso,
+        folder_id: null,
+        parent_id: null,
+      },
+      {
+        id: "study-due",
+        user_id: "user-123",
+        title: "Leitner cards due today",
+        completed: false,
+        status: "todo",
+        priority: "urgent",
+        due_date: todayIso,
+        source_type: "leitner",
+        source_id: "doc-7",
+        folder_id: null,
+        parent_id: null,
+      },
+      {
+        id: "personal-overdue",
+        user_id: "user-123",
+        title: "Overdue personal task",
+        completed: false,
+        status: "todo",
+        priority: "medium",
+        due_date: yesterdayIso,
+        folder_id: null,
+        parent_id: null,
+      },
+      {
+        id: "study-overdue",
+        user_id: "user-123",
+        title: "Overdue lesson",
+        completed: false,
+        status: "todo",
+        priority: "medium",
+        due_date: yesterdayIso,
+        source_type: "knowledge_doc",
+        source_id: "doc-8",
+        folder_id: null,
+        parent_id: null,
+      },
+    ];
+
+    render(
+      <MemoryRouter>
+        <TodayDashboardView />
+      </MemoryRouter>
+    );
+
+    expect(screen.getByTestId("today-active-tasks")).toHaveTextContent("Urgent personal task");
+    expect(screen.getByTestId("today-active-tasks")).not.toHaveTextContent("Leitner cards due today");
+    expect(screen.getByTestId("study-due-today")).toHaveTextContent("Leitner cards due today");
+    expect(screen.getByTestId("overdue-tasks")).toHaveTextContent("Overdue personal task");
+    expect(screen.getByTestId("overdue-tasks")).not.toHaveTextContent("Overdue lesson");
+    expect(screen.getByTestId("overdue-study")).toHaveTextContent("Overdue lesson");
+  });
+
+  it("shows past planned periods with overdue tasks after today's tasks", () => {
+    const yesterday = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1);
+    const pastDay = `${yesterday.getFullYear()}-${String(yesterday.getMonth() + 1).padStart(2, "0")}-${String(yesterday.getDate()).padStart(2, "0")}`;
+    mockTasks = [
+      { id: "today", user_id: "user-123", title: "Today's task", completed: false, status: "todo", priority: "none", schedule_v: 2, work_date: `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`, folder_id: null, parent_id: null },
+      { id: "past-day", user_id: "user-123", title: "Past dated task", completed: false, status: "todo", priority: "none", schedule_v: 2, work_date: pastDay, folder_id: null, parent_id: null },
+      { id: "past-period", user_id: "user-123", title: "Past planned task", completed: false, status: "todo", priority: "none", schedule_v: 2, planning_horizon: "week", planning_start: pastDay, planning_end: pastDay, folder_id: null, parent_id: null },
+    ];
+    render(<MemoryRouter><TodayDashboardView /></MemoryRouter>);
+    expect(screen.getByTestId("overdue-tasks")).toHaveTextContent("Past dated task");
+    expect(screen.getByTestId("overdue-tasks")).toHaveTextContent("Past planned task");
+    expect(screen.queryByTestId("missed-work-tasks")).not.toBeInTheDocument();
+    expect(screen.getByTestId("today-active-tasks").compareDocumentPosition(screen.getByTestId("overdue-tasks")) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+});
+
+
+it("puts pinned tasks first without the former top-three section", () => {
+  localStorage.clear();
+  const nowDate = new Date();
+  const due = new Date(nowDate.getFullYear(), nowDate.getMonth(), nowDate.getDate(), 23, 59).toISOString();
+  mockTasks = [
+    { id: "urgent", title: "Urgent but not pinned", due_date: due, priority: "urgent", completed: false, parent_id: null },
+    { id: "pinned", title: "Pinned by me", due_date: due, priority: "low", pinned: true, completed: false, parent_id: null },
+  ] as Task[];
+  render(<MemoryRouter><TodayDashboardView /></MemoryRouter>);
+  const list = screen.getByTestId("today-active-tasks");
+  expect(list.textContent!.indexOf("Pinned by me")).toBeLessThan(list.textContent!.indexOf("Urgent but not pinned"));
+  expect(screen.queryByTestId("top-priorities")).not.toBeInTheDocument();
+});
+
+describe("Today leads with one user-chosen next action", () => {
+  const now = new Date();
+  const todayIso = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59).toISOString();
+  const day = getLocalDateString();
+  const setNext = (taskId: string | null) =>
+    act(() => { updateTodayPlanning("user-123", (current) => ({ ...current, nextTaskId: taskId, nextTaskDate: taskId ? day : null })); });
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    localStorage.clear();
+    mockTasks = [];
+    focusMocks.state = null;
+    vi.stubGlobal("ResizeObserver", class { observe() {} unobserve() {} disconnect() {} });
+    setNext(null);
+  });
+  afterEach(() => {
+    focusMocks.state = null;
+    setNext(null);
+    vi.unstubAllGlobals();
+  });
+
+  it("shows the chosen next task with Start focus, Open and Change", () => {
+    mockTasks = [{ id: "next-1", user_id: "user-123", title: "Write spec", completed: false, status: "todo", priority: "high", due_date: todayIso, parent_id: null } as Task];
+    setNext("next-1");
+    render(<MemoryRouter><TodayDashboardView /></MemoryRouter>);
+
+    const row = screen.getByTestId("today-next-action");
+    expect(row).toHaveTextContent("Write spec");
+    expect(screen.getByTestId("today-next-primary")).toHaveTextContent("Start focus");
+    expect(screen.getByTestId("today-next-open")).toHaveTextContent("Open");
+    expect(screen.getByTestId("today-next-change")).toHaveTextContent("Change");
+    // The old duplicated header chip is gone.
+    expect(screen.queryByTestId("today-next-selection")).not.toBeInTheDocument();
+  });
+
+  it("offers Start review for a study next task and opens the review session", async () => {
+    mockTasks = [{ id: "study-1", user_id: "user-123", title: "Leitner cards", completed: false, status: "todo", priority: "medium", due_date: todayIso, source_type: "leitner", source_id: "doc-7", parent_id: null } as Task];
+    setNext("study-1");
+    render(<MemoryRouter initialEntries={["/app/today"]}><LocationProbe /><TodayDashboardView /></MemoryRouter>);
+
+    const primary = screen.getByTestId("today-next-primary");
+    expect(primary).toHaveTextContent("Start review");
+    fireEvent.click(primary);
+    await waitFor(() => expect(screen.getByTestId("location-probe")).toHaveTextContent("/app/recall?docId=doc-7"));
+  });
+
+  it("surfaces the live focus runtime controls instead of a second timer", () => {
+    focusMocks.state = {
+      userId: "user-123",
+      session: { startedAt: 1, endAt: 2, remaining: 90, mode: "work", taskId: "x", taskTitle: "Deep work" },
+    };
+    render(<MemoryRouter><TodayDashboardView /></MemoryRouter>);
+
+    const row = screen.getByTestId("today-next-action");
+    expect(row).toHaveTextContent("Deep work");
+    expect(row).toHaveTextContent("01:30");
+    expect(screen.getByRole("button", { name: "Pause" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Finish and save time" })).toBeInTheDocument();
+    expect(screen.queryByTestId("today-next-primary")).not.toBeInTheDocument();
+  });
+
+  it("shows Choose your next task when nothing is selected and lets the user pick one", async () => {
+    mockTasks = [{ id: "cand-1", user_id: "user-123", title: "Candidate task", completed: false, status: "todo", priority: "none", due_date: todayIso, parent_id: null } as Task];
+    render(<MemoryRouter><TodayDashboardView /></MemoryRouter>);
+
+    expect(screen.queryByTestId("today-next-primary")).not.toBeInTheDocument();
+    const choose = screen.getByTestId("today-next-choose");
+    expect(choose).toHaveTextContent("Choose your next task");
+
+    fireEvent.click(choose);
+    const picker = await screen.findByTestId("today-next-picker");
+    fireEvent.click(within(picker).getByText("Candidate task"));
+    await waitFor(() => expect(screen.getByTestId("today-next-title")).toHaveTextContent("Candidate task"));
+  });
+});
+

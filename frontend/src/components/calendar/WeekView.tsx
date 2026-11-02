@@ -1,0 +1,207 @@
+import { useEffect, useRef, useState } from "react";
+import { eachDayOfInterval, startOfWeek, endOfWeek, isSameDay, format } from "date-fns";
+import { getWeekStart, weekStartsOn as weekStartsOnFor } from "@/lib/timeHorizon";
+import { Link, useNavigate } from "react-router-dom";
+import { formatDate, toPersianDigits, type CalendarSystem } from "@/lib/jalali";
+import { isHoliday, dominantKind, HOLIDAY_TONE, type Holiday } from "@/lib/holidays";
+import { useTapGestures } from "@/lib/useTapGestures";
+import { usePinchZoom } from "@/lib/usePinchZoom";
+import { ZoomIn } from "lucide-react";
+import { parseTaskDueDate } from "@/lib/taskDate";
+import { isAllDayCalendarDate, type CalendarTask } from "./CalendarTask";
+import DeadlineMarker from "./DeadlineMarker";
+import { useBilingual } from "@/hooks/useBilingual";
+import { Button } from "@/components/ui/button";
+import { PRIORITY_META, normalizeTaskPriority } from "@/lib/priority";
+
+const HOURS = Array.from({ length: 24 }, (_, i) => i);
+const BASE_ROW = 36;
+
+function Slot({
+  d, h, slotTasks, onClick, onDouble, height, label,
+}: {
+  d: Date; h: number; slotTasks: CalendarTask[]; onClick: () => void; onDouble: () => void; height: number; label: string;
+}) {
+  const { T } = useBilingual();
+  const { handlers } = useTapGestures({ onSingleTap: onClick, onDoubleTap: onDouble });
+  return (
+    <div
+      className="relative bg-card border-t p-0.5 text-end hover:bg-accent/30 transition cursor-pointer select-none"
+      style={{ minHeight: height }}
+    >
+      {/* Full-cell keyboard/pointer target. Kept as a sibling of the task chips so the
+          chips stay independently focusable (no nested interactive elements). */}
+      <button
+        type="button"
+        {...handlers}
+        onClick={onClick}
+        aria-label={label}
+        className="absolute inset-0 z-0 w-full cursor-pointer rounded-none bg-transparent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-inset"
+      />
+      <div className="relative z-10 flex flex-col">
+        {slotTasks.map((t) => (
+          <Link
+            key={t.id}
+            to={`/app/tasks/${t.id}`}
+            onClick={(e) => e.stopPropagation()}
+            aria-label={t.title}
+            className="bg-muted text-foreground/80 text-[10px] truncate rounded-md px-2 py-1 mb-1 border border-border/60 cursor-pointer text-end hover:bg-accent/60 transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary"
+          >
+            <span className="inline-flex max-w-full items-center gap-1">
+              <span className="truncate">{t.title}</span>
+              <span className={`shrink-0 ${PRIORITY_META[normalizeTaskPriority(t.priority)].textClass}`}>{T(PRIORITY_META[normalizeTaskPriority(t.priority)].label, PRIORITY_META[normalizeTaskPriority(t.priority)].labelEn)}</span>
+              <DeadlineMarker deadlineDate={t.deadline_date} completed={t.completed} status={t.status} recurrence={t.recurrence} recurrence_rule={t.recurrence_rule} />
+            </span>
+          </Link>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+export default function WeekView({
+  date, tasks, holidays, system, onDayClick, onSlotClick,
+}: {
+  date: Date;
+  tasks: CalendarTask[];
+  holidays: Holiday[];
+  system: CalendarSystem;
+  onDayClick: (d: Date) => void;
+  onSlotClick?: (d: Date, hour: number) => void;
+}) {
+  const navigate = useNavigate();
+  const { T } = useBilingual();
+  const weekStartsOn: 1 | 6 = weekStartsOnFor(getWeekStart());
+  const days = eachDayOfInterval({ start: startOfWeek(date, { weekStartsOn }), end: endOfWeek(date, { weekStartsOn }) });
+  const { scale, setScale, handlers: pinchHandlers } = usePinchZoom({ initial: 1, min: 0.6, max: 2.4 });
+  const [hint, setHint] = useState(false);
+  const hintTimer = useRef<number | null>(null);
+  const ROW_H = BASE_ROW * scale;
+  const zoom = (delta: number) => setScale((value) => Math.max(0.6, Math.min(2.4, Math.round((value + delta) * 10) / 10)));
+  useEffect(() => () => { if (hintTimer.current) window.clearTimeout(hintTimer.current); }, []);
+
+  const onPinchStart = (e: React.TouchEvent) => {
+    if (e.touches.length === 2) {
+      setHint(true);
+      if (hintTimer.current) window.clearTimeout(hintTimer.current);
+      hintTimer.current = window.setTimeout(() => setHint(false), 700);
+    }
+    pinchHandlers.onTouchStart(e);
+  };
+
+  const quickCreate = (d: Date, h: number) => {
+    const dt = new Date(d); dt.setHours(h, 0, 0, 0);
+    navigate(`/app/tasks/new?due_date=${encodeURIComponent(dt.toISOString())}`);
+  };
+
+  const slotLabel = (d: Date, h: number) => {
+    const dateLabel = system === "jalali" ? formatDate(d, "yyyy/MM/dd", "jalali") : format(d, "yyyy-MM-dd");
+    const hourLabel = system === "jalali" ? toPersianDigits(String(h).padStart(2, "0")) : String(h).padStart(2, "0");
+    return `${dateLabel} ${hourLabel}:00 — ${T("ساخت تسک", "Create task")}`;
+  };
+
+  return (
+    <div
+      className="overflow-x-auto relative"
+      tabIndex={0}
+      role="region"
+      aria-label={T("تقویم هفتگی؛ زوم با +، - و 0", "Weekly calendar; zoom with +, - and 0")}
+      onKeyDown={(event) => {
+        if (event.target !== event.currentTarget || event.ctrlKey || event.metaKey || event.altKey) return;
+        if (event.key === "+" || event.key === "=") { event.preventDefault(); zoom(0.2); }
+        else if (event.key === "-") { event.preventDefault(); zoom(-0.2); }
+        else if (event.key === "0") { event.preventDefault(); setScale(1); }
+      }}
+      onTouchStart={onPinchStart}
+      onTouchMove={pinchHandlers.onTouchMove}
+      onTouchEnd={pinchHandlers.onTouchEnd}
+    >
+      <div className="mb-2 flex items-center gap-2" role="group" aria-label={T("زوم تقویم", "Calendar zoom")}>
+        <Button type="button" size="sm" variant="outline" aria-label={T("کوچک‌نمایی", "Zoom out")} disabled={scale <= 0.6} onClick={() => zoom(-0.2)}>−</Button>
+        <output className="text-xs tabular-nums" aria-live="polite">{Math.round(scale * 100)}%</output>
+        <Button type="button" size="sm" variant="outline" aria-label={T("بزرگ‌نمایی", "Zoom in")} disabled={scale >= 2.4} onClick={() => zoom(0.2)}>+</Button>
+        <Button type="button" size="sm" variant="ghost" onClick={() => setScale(1)}>{T("بازنشانی زوم", "Reset zoom")}</Button>
+      </div>
+      {hint && (
+        <div className="absolute top-2 left-2 z-20 bg-background/90 backdrop-blur border rounded-full px-2 py-1 text-[10px] flex items-center gap-1 shadow">
+          <ZoomIn className="w-3 h-3" /> {Math.round(scale * 100)}%
+        </div>
+      )}
+      <div className="min-w-[700px]">
+        <div className="grid grid-cols-[48px_repeat(7,1fr)] gap-px bg-border sticky top-0 z-10">
+          <div className="bg-card" />
+          {days.map((d) => {
+            const kind = dominantKind(isHoliday(d, holidays));
+            const off = kind !== null || (system === "jalali" && d.getDay() === 5);
+            return (
+              <button
+                key={d.toISOString()}
+                onClick={() => onDayClick(d)}
+                aria-label={`${system === "jalali" ? formatDate(d, "yyyy/MM/dd", "jalali") : format(d, "yyyy-MM-dd")} — ${T("نمای روز", "Day view")}`}
+                className={`bg-card p-2 text-center text-xs hover:bg-accent/40 transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-inset ${kind ? `${HOLIDAY_TONE[kind].text} ${HOLIDAY_TONE[kind].bg}` : off ? "text-muted-foreground" : ""} ${isSameDay(d, new Date()) ? "bg-primary/5 ring-1 ring-primary/20" : ""}`}
+              >
+                <div className="font-semibold">
+                  {system === "jalali" ? toPersianDigits(formatDate(d, "d", "jalali")) : format(d, "d")}
+                </div>
+                <div className="text-[10px] text-muted-foreground mt-0.5">
+                  {system === "jalali" ? formatDate(d, "EEEEEE", "jalali") : format(d, "EEE")}
+                </div>
+              </button>
+            );
+          })}
+        </div>
+        {tasks.some((task) => isAllDayCalendarDate(task.due_date, task.schedule_v)) && (
+          <div className="grid grid-cols-[48px_repeat(7,1fr)] gap-px bg-border" data-testid="calendar-all-day-row">
+            <div className="bg-card p-1 text-center text-[9px] text-muted-foreground">{T("تمام‌روز", "All day")}</div>
+            {days.map((d) => {
+              const allDayTasks = tasks.filter((task) => {
+                if (!isAllDayCalendarDate(task.due_date, task.schedule_v)) return false;
+                const taskDate = task.due_date ? parseTaskDueDate(task.due_date) : null;
+                return !!taskDate && isSameDay(taskDate, d);
+              });
+              return (
+                <div key={`all-day-${d.toISOString()}`} className="min-h-9 bg-card p-0.5">
+                  {allDayTasks.map((task) => (
+                    <Link key={task.id} to={`/app/tasks/${task.id}`}
+                      aria-label={task.title}
+                      className="mb-0.5 flex max-w-full items-center gap-1 rounded-md border border-border/60 bg-muted px-1.5 py-1 text-start text-[10px] text-foreground/80 hover:bg-accent/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary">
+                      <span className="truncate">{task.title}</span>
+                      <span className={`shrink-0 ${PRIORITY_META[normalizeTaskPriority(task.priority)].textClass}`}>{T(PRIORITY_META[normalizeTaskPriority(task.priority)].label, PRIORITY_META[normalizeTaskPriority(task.priority)].labelEn)}</span>
+                      <DeadlineMarker deadlineDate={task.deadline_date} completed={task.completed} status={task.status} recurrence={task.recurrence} recurrence_rule={task.recurrence_rule} />
+                    </Link>
+                  ))}
+                </div>
+              );
+            })}
+          </div>
+        )}
+        <div className="grid grid-cols-[48px_repeat(7,1fr)] gap-px bg-border">
+          {HOURS.map((h) => (
+            <div key={`row-${h}`} className="contents">
+              <div className="bg-card text-[10px] text-muted-foreground p-1 text-center border-t" style={{ minHeight: ROW_H }}>
+                {toPersianDigits(String(h).padStart(2, "0"))}
+              </div>
+              {days.map((d) => {
+                const slotTasks = tasks.filter((t) => {
+                  if (!t.due_date || isAllDayCalendarDate(t.due_date, t.schedule_v)) return false;
+                  const dt = parseTaskDueDate(t.due_date);
+                  if (!dt) return false;
+                  return isSameDay(dt, d) && dt.getHours() === h;
+                });
+                return (
+                  <Slot
+                    key={`${d.toISOString()}-${h}`}
+                    d={d} h={h} slotTasks={slotTasks} height={ROW_H}
+                    label={slotLabel(d, h)}
+                    onClick={() => onSlotClick?.(d, h)}
+                    onDouble={() => quickCreate(d, h)}
+                  />
+                );
+              })}
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}

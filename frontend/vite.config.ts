@@ -1,0 +1,247 @@
+import { defineConfig } from "vite";
+import react from "@vitejs/plugin-react-swc";
+import path from "path";
+import fs from "fs";
+import { execSync } from "child_process";
+import { fileURLToPath } from "url";
+import { VitePWA } from "vite-plugin-pwa";
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+function getGitInfo() {
+  try {
+    return {
+      commit: execSync("git rev-parse --short HEAD", { cwd: __dirname, stdio: ["ignore", "pipe", "ignore"] }).toString().trim(),
+      buildNumber: execSync("git rev-list --count HEAD", { cwd: __dirname, stdio: ["ignore", "pipe", "ignore"] }).toString().trim(),
+    };
+  } catch {
+    return { commit: "unknown", buildNumber: String(Date.now()) };
+  }
+}
+
+const pkg = JSON.parse(fs.readFileSync(path.resolve(__dirname, "package.json"), "utf-8"));
+const gitInfo = getGitInfo();
+const version = pkg.version || "0.0.0";
+const buildTime = new Date().toISOString();
+const buildId = String(Date.now());
+const buildNumber = gitInfo.buildNumber;
+const commit = gitInfo.commit;
+const fullVersion = `${version}+${buildNumber}.${commit}`;
+
+const versionJson = {
+  version,
+  commit,
+  buildTime,
+  buildId,
+  buildNumber,
+  fullVersion,
+};
+
+function versionJsonPlugin() {
+  return {
+    name: "version-json",
+    configureServer(server: any) {
+      server.middlewares.use((req: any, res: any, next: any) => {
+        if (req.url?.split("?")[0] === "/version.json") {
+          res.setHeader("Content-Type", "application/json");
+          res.end(JSON.stringify(versionJson));
+          return;
+        }
+        next();
+      });
+    },
+    writeBundle() {
+      const out = path.resolve(__dirname, "dist/version.json");
+      fs.mkdirSync(path.dirname(out), { recursive: true });
+      fs.writeFileSync(out, JSON.stringify(versionJson, null, 2));
+    },
+  };
+}
+
+// https://vitejs.dev/config/
+export default defineConfig(({ mode }) => {
+  return ({
+  preview: {
+    host: "0.0.0.0",
+    port: 3000,
+    allowedHosts: true,
+    proxy: { "/api/arsh": { target: "http://localhost:8001", changeOrigin: true } },
+  },
+  server: {
+    host: "0.0.0.0",
+    port: 3000,
+    strictPort: false,
+    allowedHosts: true,
+    // Local dev: forward the ARSHNAZ FastAPI service (the preview ingress already routes /api/* to it).
+    proxy: { "/api/arsh": { target: "http://localhost:8001", changeOrigin: true } },
+    hmr: {
+      overlay: false,
+      clientPort: 443,
+      protocol: "wss",
+    },
+  },
+  plugins: [
+    react(),
+    versionJsonPlugin(),
+    VitePWA({
+      registerType: "autoUpdate",
+      devOptions: { enabled: false },
+      includeAssets: ["favicon.ico", "robots.txt", "pwa-512x512.png"],
+      manifest: {
+        name: "ARSHNAZ — ارشناز · برنامه‌ریزی و مدیریت کارها",
+        short_name: "ARSHNAZ",
+        description: "ارشناز — برنامه‌ریزی هوشمند، مدیریت کارها، تقویم و تمرکز.", 
+        theme_color: "#0F172A",
+        background_color: "#0F172A",
+        display: "standalone",
+        orientation: "portrait",
+        start_url: "/app/today",
+        scope: "/",
+        lang: "fa",
+        dir: "rtl",
+        icons: [
+          {
+            src: "/pwa-512x512.png",
+            sizes: "512x512",
+            type: "image/png",
+            purpose: "any",
+          },
+          {
+            src: "/pwa-512x512.png",
+            sizes: "512x512",
+            type: "image/png",
+            purpose: "maskable",
+          },
+        ],
+        // Home-screen shortcuts (Android long-press menu) — closest thing PWA has to widgets
+        shortcuts: [
+          {
+            name: "تسک امروز",
+            short_name: "امروز",
+            description: "تسک‌های امروز را ببین",
+            url: "/app/today",
+            icons: [{ src: "/pwa-512x512.png", sizes: "512x512" }],
+          },
+          {
+            name: "برنامه‌ریزی",
+            short_name: "برنامه",
+            description: "برنامه هفته، ماه و سال",
+            url: "/app/planning",
+            icons: [{ src: "/pwa-512x512.png", sizes: "512x512" }],
+          },
+          {
+            name: "تقویم",
+            short_name: "تقویم",
+            description: "تقویم شمسی و میلادی",
+            url: "/app/calendar",
+            icons: [{ src: "/pwa-512x512.png", sizes: "512x512" }],
+          },
+          {
+            name: "Pomodoro",
+            short_name: "تمرکز",
+            description: "شروع جلسه تمرکز",
+            url: "/app/pomodoro",
+            icons: [{ src: "/pwa-512x512.png", sizes: "512x512" }],
+          },
+        ],
+      },
+      workbox: {
+        navigateFallback: "/index.html",
+        navigateFallbackDenylist: [/^\/~oauth/, /^\/api/, /^\/version\.json/, /^\/openapi\.json/],
+        // Precache only the offline app shell (JS/CSS/HTML/fonts + small icons).
+        // The heavy public artwork (garden-*.png, images/angel-*.png, diary-bg/*) used to be
+        // precached too and made the first visit download ~12.8 MB of images; it is now
+        // fetched on demand and kept by the runtimeCaching rules below.
+        // NOTE: pwa-512x512.png / favicon.ico / robots.txt come from `includeAssets` — do not
+        // list them here again or the manifest gets duplicate entries.
+        globPatterns: [
+          "**/*.{js,css,html,svg,woff2}",
+          "favicon.png",
+          "pwa-192x192.png",
+          "apple-touch-icon.png",
+        ],
+        maximumFileSizeToCacheInBytes: 1 * 1024 * 1024,
+        clientsClaim: true,
+        skipWaiting: true,
+        cleanupOutdatedCaches: true,
+        runtimeCaching: [
+          {
+            urlPattern: ({ url }) => url.pathname.startsWith("/assets/"),
+            handler: "StaleWhileRevalidate",
+            options: {
+              cacheName: "static-assets",
+              expiration: { maxEntries: 200, maxAgeSeconds: 60 * 60 * 24 * 7 },
+            },
+          },
+          {
+            // Artwork that is no longer precached: cache on first use, then serve instantly
+            // (garden-*.png, images/angel-*.png, diary-bg/*). Expiration caps disk usage, and
+            // purgeOnQuotaError keeps a big image from failing the whole cache write.
+            urlPattern: ({ url }) => /\.(?:png|jpe?g|webp|avif)$/i.test(url.pathname),
+            handler: "CacheFirst",
+            options: {
+              cacheName: "artwork-images",
+              expiration: { maxEntries: 40, maxAgeSeconds: 60 * 60 * 24 * 30, purgeOnQuotaError: true },
+              cacheableResponse: { statuses: [0, 200] },
+            },
+          },
+        ],
+      },
+    }),
+  ].filter(Boolean),
+  resolve: {
+    alias: {
+      "@": path.resolve(__dirname, "./src"),
+    },
+    dedupe: ["react", "react-dom", "react/jsx-runtime", "react/jsx-dev-runtime", "@tanstack/react-query", "@tanstack/query-core", "@tiptap/core", "@tiptap/pm", "prosemirror-model", "prosemirror-state", "prosemirror-view", "prosemirror-transform", "prosemirror-keymap", "prosemirror-commands"],
+  },
+  optimizeDeps: {
+    include: ["prosemirror-model", "prosemirror-state", "prosemirror-view", "prosemirror-transform"],
+  },
+  esbuild: {
+    drop: mode === "production" ? ["debugger"] : [],
+    pure: mode === "production" ? ["console.log", "console.debug", "console.info"] : [],
+  },
+  build: {
+    target: "es2020",
+    cssCodeSplit: true,
+    sourcemap: false,
+    chunkSizeWarningLimit: 600,
+    rollupOptions: {
+      output: {
+        manualChunks(id) {
+          if (id.includes("node_modules")) {
+            if (id.includes("@tiptap") || id.includes("prosemirror") || id.includes("turndown") || id.includes("marked")) {
+              return "vendor-editor";
+            }
+            if (id.includes("recharts") || id.includes("d3-")) {
+              return "vendor-charts";
+            }
+            if (id.includes("firebase/firestore") || id.includes("@firebase/firestore")) {
+              return "vendor-firestore";
+            }
+            if (id.includes("firebase/storage") || id.includes("@firebase/storage")) {
+              return "vendor-storage";
+            }
+            if (id.includes("firebase") || id.includes("@firebase")) {
+              return "vendor-firebase-core";
+            }
+            if (id.includes("lucide-react")) {
+              return "vendor-icons";
+            }
+          }
+        },
+      },
+    },
+  },
+  define: {
+    "import.meta.env.VITE_APP_VERSION": JSON.stringify(version),
+    "import.meta.env.VITE_BUILD_TIME": JSON.stringify(buildTime),
+    "import.meta.env.VITE_BUILD_ID": JSON.stringify(buildId),
+    "import.meta.env.VITE_BUILD_NUMBER": JSON.stringify(buildNumber),
+    "import.meta.env.VITE_GIT_COMMIT": JSON.stringify(commit),
+    "import.meta.env.VITE_FULL_VERSION": JSON.stringify(fullVersion),
+  },
+});
+});

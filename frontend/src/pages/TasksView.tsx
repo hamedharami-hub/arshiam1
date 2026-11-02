@@ -1,0 +1,1338 @@
+import { PlanningBoard } from "@/components/planning/PlanningBoard";
+import { getTimeSettings } from "@/lib/timeHorizon";
+import { ListViewSwitch } from "@/components/ListViewSwitch";
+import { getTaskPlanning, isTaskOverdue, isTaskMissedWorkDay, planningScopeTasks } from "@/lib/taskPlanning";
+import { readTaskListSort, saveTaskListSort, TASK_LIST_SORT_EVENT } from "@/lib/taskListSort";
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
+import { useParams, useSearchParams } from "react-router-dom";
+import { useTranslation } from "react-i18next";
+import { startOfDay, endOfDay, addDays, format } from "date-fns";
+import { formatDate } from "@/lib/jalali";
+import { EmptyState } from "@/components/EmptyState";
+import { Plus, Calendar, Trash2, ChevronRight, ChevronDown, Flag, GripVertical, CornerDownRight, Ban, Pin, Clock, FolderInput, Check, X, GitBranch, MoreVertical, Zap, Columns2, CheckSquare, CheckCircle2, Loader2, RefreshCw } from "lucide-react";
+import { MoveToDialog } from "@/components/MoveToDialog";
+import { FolderDeleteDialog } from "@/components/FolderDeleteDialog";
+import { useNavigate } from "react-router-dom";
+import { firebaseStore } from "@/lib/firebaseStore";
+import {
+  deleteTaskCascade,
+  removeTask,
+  saveTask,
+} from "@/features/tasks/taskService";
+import { persistTask, type TaskPersistenceStatus } from "@/lib/firestoreDataService";
+import { applyPatchResolution, beginTaskPatch, createTaskPatchJournal, resolveTaskPatch } from "@/lib/taskPatchJournal";
+import { toSaveStatus } from "@/lib/saveFeedback";
+import {
+  buildTaskChildrenMap,
+  collectTaskDescendantIds,
+  getTaskProgress,
+  isStandaloneTaskForScope,
+} from "@/features/tasks/taskTree";
+import { extractTasksFromCache } from "@/features/tasks/taskCache";
+import { applyVisualTaskPatches } from "@/features/tasks/visualTaskPatches";
+import { useAuth } from "@/hooks/useAuth";
+import { useTasksData } from "@/hooks/useTasksData";
+import { syncAndroidWidget } from "@/lib/androidWidget";
+import { getStudyTaskNavigation, isLeitnerStudyTask } from "@/lib/taskStudyService";
+import { syncNativeTaskReminder } from "@/lib/reminders";
+import { Button } from "@/components/ui/button";
+import { BidiText } from "@/components/BidiText";
+import { HeaderActionsPortal } from "@/components/HeaderActionsPortal";
+import { HeaderTitlePortal } from "@/components/HeaderTitlePortal";
+
+import { Checkbox } from "@/components/ui/checkbox";
+import { Card } from "@/components/ui/card";
+import { TaskDeleteConfirmDialog } from "@/components/tasks/TaskDeleteConfirmDialog";
+import { toast } from "sonner";
+import { PRIORITY_META } from "@/lib/priority";
+import { FolderKanban } from "@/components/FolderKanban";
+import { useDeviceFormFactor } from "@/hooks/useDeviceFormFactor";
+import { parseTaskDueDate, taskDueTimestamp, getLocalDateString, taskWorkDate, workDatePatch, moveTaskDayPatch } from "@/lib/taskDate";
+import type { TaskSwipeAction } from "@/lib/taskSwipeSettings";
+import { readSchedule, schedulePatch } from "@/lib/taskSchedule";
+import { pushUndo } from "@/lib/undoStack";
+import { pushDeleted, pushDeletedTask } from "@/lib/recentlyDeleted";
+import { enqueueOp, cacheGet } from "@/lib/offlineQueue";
+import { logTaskActivity } from "@/lib/taskActivity";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuRadioGroup,
+  DropdownMenuRadioItem,
+  DropdownMenuSeparator,
+  DropdownMenuSub,
+  DropdownMenuSubContent,
+  DropdownMenuSubTrigger,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
+import { describeRule, nextOccurrence } from "@/lib/recurrence";
+import { isRecurringTask, advanceRecurringTask } from "@/lib/recurringTaskService";
+import {
+  DndContext, DragEndEvent, DragOverlay, DragStartEvent, PointerSensor, TouchSensor,
+  closestCenter, useSensor, useSensors,
+  SortableTaskRow,
+} from "@/components/TaskDnDHelpers";
+import { SortableContext, verticalListSortingStrategy, arrayMove } from "@dnd-kit/sortable";
+
+import { TaskFilterSheet, DEFAULT_FILTERS, type TaskFilters, type SortLevel } from "@/components/TaskFilterSheet";
+import { SmartListProfileBar } from "@/components/SmartListProfileBar";
+import { filterAndSortTasks } from "@/lib/smartListService";
+import { getAllKanbanGoals, type GoalKanban } from "@/lib/kanbanGoals";
+import { playCompletionFeedback } from "@/lib/completionFeedback";
+import { QuickAddTask } from "@/components/QuickAddTask";
+import { VirtualTaskList } from "@/components/VirtualTaskList";
+import { TaskDetail } from "@/components/TaskDetail";
+import { useResizableSplit } from "@/hooks/useResizableSplit";
+import type { Task, ConfirmState, TaskOutcome, TaskStatus } from "@/lib/taskTypes";
+import { OutcomePicker } from "@/components/OutcomePicker";
+import { listTaskOutcomes, executeTaskOutcome } from "@/lib/taskOutcomes";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
+import SwipeableRow, { type SwipeAction } from "@/components/gestures/SwipeableRow";
+import PullToRefresh from "@/components/gestures/PullToRefresh";
+import TaskActionSheet from "@/components/TaskActionSheet";
+import PomodoroSheet from "@/components/PomodoroSheet";
+import { useLongPress } from "@/lib/useLongPress";
+import { DueDatePicker } from "@/components/DueDatePicker";
+import { RecurrenceEditor } from "@/components/RecurrenceEditor";
+import { MakeChildDialog } from "@/components/MakeChildDialog";
+import { PRIORITY_SELECTABLE, type Priority } from "@/lib/priority";
+import { Repeat } from "lucide-react";
+import type { RecurrenceRule } from "@/lib/recurrence";
+import { awardTaskWatering } from "@/lib/garden";
+import { DEFAULT_FOLDER_PREFS, getFolderPrefs, saveFolderPrefs, type FolderPrefs } from "@/lib/folderPrefs";
+import { getShowCompletedTasks, setShowCompletedTasks, useShowCompletedTasks } from "@/lib/completedTaskVisibility";
+import { TasksHeader, FOLDER_BG_COLORS, FOLDER_BG_IMAGES } from "./tasks/TasksHeader";
+import { buildGroupedTasks } from "./tasks/TaskDueDateGroups";
+import { filterTopLevelTasksByScope, sortFolderTopLevelTasks } from "./tasks/taskScopeFilter";
+import { TasksListViewSection } from "./tasks/TasksListViewSection";
+
+import { TaskListItem, outcomeMeta, groupedChildren } from "@/components/TaskListItem";
+import { currentAnchor, doesTaskMatchBucketScope } from "@/lib/timeBuckets";
+
+export default function TasksView({ scope }: { scope: "inbox" | "today" | "tomorrow" | "next7" | "smart" | "folder" | "tag" }) {
+  const { user } = useAuth();
+  const showCompletedTasks = useShowCompletedTasks();
+  const { i18n } = useTranslation();
+  const isEn = (i18n.language || "fa").startsWith("en");
+  const T = useCallback((fa: string, en: string) => (isEn ? en : fa), [isEn]);
+  const params = useParams();
+  const [searchParams, setSearchParams] = useSearchParams();
+  const navigate = useNavigate();
+  const { isPhone } = useDeviceFormFactor();
+  const [layout, setLayout] = useState<"compact" | "comfortable">("compact");
+  useEffect(() => {
+    if (!user) return;
+    firebaseStore.from("user_settings").select("task_card_layout").eq("user_id", user.id).maybeSingle()
+      .then(({ data }) => { if (data?.task_card_layout) setLayout(data.task_card_layout as any); });
+  }, [user]);
+  const {
+    allTasks,
+    setAllTasks,
+    taskTagsMap,
+    outcomeById,
+    outcomeByTaskId,
+    folderName,
+    tagName,
+    isReady,
+    hasLoadError,
+    loadErrorMessage,
+    load,
+  } = useTasksData({ user, scope, scopeId: params.id });
+  // Soft-completed / soft-deleted tasks are kept visible for a short grace period
+  // so users see the strikethrough before the item disappears.
+  const [graceTasks, setGraceTasks] = useState<Record<string, Task & { _graceUntil: number }>>({});
+  const [graceMap, setGraceMap] = useState<Record<string, number>>({});
+  const graceTimersRef = useRef<Record<string, number>>({});
+  // A slower cache refresh or Firestore snapshot must not repaint a just-edited
+  // badge with its previous value while the user remains on this list.
+  const [visualPatches, setVisualPatches] = useState<Record<string, Partial<Task>>>({});
+  const patchJournal = useRef(createTaskPatchJournal());
+  const activeUserId = useRef<string | null>(user?.id ?? null);
+  activeUserId.current = user?.id ?? null;
+  useEffect(() => { setVisualPatches({}); }, [user?.id]);
+  const GRACE_MS = 5000;
+  const effectiveAllTasks = useMemo(() => {
+    const now = Date.now();
+    const activeGhosts = Object.values(graceTasks).filter(
+      (g) => (graceMap[g.id] || 0) > now && !allTasks.some((t) => t.id === g.id),
+    );
+    const base = activeGhosts.length ? [...allTasks, ...activeGhosts] : allTasks;
+    return applyVisualTaskPatches(base, visualPatches);
+  }, [allTasks, graceTasks, graceMap, visualPatches]);
+  const currentTasksRef = useRef<Task[]>(effectiveAllTasks);
+  currentTasksRef.current = effectiveAllTasks;
+  const keepCompletedTaskVisible = (taskId: string) => {
+    const previousTimer = graceTimersRef.current[taskId];
+    if (previousTimer !== undefined) window.clearTimeout(previousTimer);
+    const until = Date.now() + GRACE_MS;
+    setGraceMap((prev) => ({ ...prev, [taskId]: until }));
+    graceTimersRef.current[taskId] = window.setTimeout(() => {
+      setGraceMap((prev) => { const next = { ...prev }; delete next[taskId]; return next; });
+      delete graceTimersRef.current[taskId];
+    }, GRACE_MS);
+  };
+  const clearCompletedTaskGrace = (taskId: string) => {
+    const timer = graceTimersRef.current[taskId];
+    if (timer !== undefined) window.clearTimeout(timer);
+    delete graceTimersRef.current[taskId];
+    setGraceMap((prev) => { const next = { ...prev }; delete next[taskId]; return next; });
+  };
+  useEffect(() => () => {
+    Object.values(graceTimersRef.current).forEach((timer) => window.clearTimeout(timer));
+    graceTimersRef.current = {};
+  }, []);
+  useEffect(() => {
+    void syncAndroidWidget(allTasks, user?.id).catch(() => {});
+    void Promise.all(allTasks
+      .filter((task) => task.reminder_at || task.completed)
+      .slice(0, 100)
+      .map((task) => syncNativeTaskReminder(task)));
+  }, [allTasks, user?.id]);
+  const [expanded, setExpanded] = useState<Record<string, boolean>>({});
+  // selected task removed — clicks navigate to /app/tasks/:id
+  const [folderPrefs, setFolderPrefs] = useState<FolderPrefs>(DEFAULT_FOLDER_PREFS);
+  const [confirm, setConfirm] = useState<ConfirmState>(null);
+  const [activeDragId, setActiveDragId] = useState<string | null>(null);
+  const [moveTask, setMoveTask] = useState<Task | null>(null);
+  const [makeChildOf, setMakeChildOf] = useState<Task | null>(null);
+  const [delFolderOpen, setDelFolderOpen] = useState(false);
+  const [actionTask, setActionTask] = useState<Task | null>(null);
+  const [selectedTask, setSelectedTask] = useState<Task | null>(null);
+  const [selectedTaskHistory, setSelectedTaskHistory] = useState<Task[]>([]);
+  const completionLinkRef = useRef<string | null>(null);
+  useEffect(() => { setSelectedTask(null); setSelectedTaskHistory([]); }, [scope, params.id]);
+
+  const handleBackInDrawer = useCallback(() => {
+    setSelectedTaskHistory((prev) => {
+      if (prev.length === 0) {
+        setSelectedTask(null);
+        return [];
+      }
+      const next = [...prev];
+      const previousTask = next.pop()!;
+      const fresh = allTasks.find(t => t.id === previousTask.id) || previousTask;
+      setSelectedTask(fresh);
+      return next;
+    });
+  }, [allTasks]);
+
+  const handleOpenParentInDrawer = useCallback(async (targetTaskId: string) => {
+    if (!selectedTask) return;
+    let target = allTasks.find(t => t.id === targetTaskId);
+    if (!target && user) {
+      try {
+        const cachedRaw = await cacheGet<unknown>(`tasks:all:${user.id}`);
+        const cached = extractTasksFromCache(cachedRaw);
+        target = cached.find(t => t.id === targetTaskId);
+      } catch {}
+    }
+    if (!target) {
+      try {
+        const { data } = await firebaseStore.from("tasks").select("*").eq("id", targetTaskId).maybeSingle();
+        if (data) target = data as unknown as Task;
+      } catch {}
+    }
+    if (target) {
+      setSelectedTaskHistory(prev => [...prev, selectedTask]);
+      setSelectedTask(target);
+    } else {
+      navigate(`/app/tasks/${encodeURIComponent(targetTaskId)}?from=${encodeURIComponent(selectedTask.id)}`);
+    }
+  }, [selectedTask, allTasks, user, navigate]);
+
+  const [splitView, setSplitView] = useState<boolean>(() => {
+    if (typeof window === "undefined") return true;
+    return localStorage.getItem("arshnaz_tasks_split_view") !== "false";
+  });
+  const [isWideOrFoldable, setIsWideOrFoldable] = useState<boolean>(() => {
+    if (typeof window === "undefined") return true;
+    return (
+      window.innerWidth >= 600 ||
+      (typeof window.matchMedia === "function" &&
+        (window.matchMedia("(horizontal-viewport-segments: 2)").matches ||
+          window.matchMedia("(spanning: single-fold-vertical)").matches))
+    );
+  });
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const check = () => {
+      const wide =
+        window.innerWidth >= 600 ||
+        (typeof window.matchMedia === "function" &&
+          (window.matchMedia("(horizontal-viewport-segments: 2)").matches ||
+            window.matchMedia("(spanning: single-fold-vertical)").matches));
+      setIsWideOrFoldable(wide);
+    };
+    window.addEventListener("resize", check);
+    const m1 = window.matchMedia?.("(horizontal-viewport-segments: 2)");
+    const m2 = window.matchMedia?.("(spanning: single-fold-vertical)");
+    m1?.addEventListener?.("change", check);
+    m2?.addEventListener?.("change", check);
+    return () => {
+      window.removeEventListener("resize", check);
+      m1?.removeEventListener?.("change", check);
+      m2?.removeEventListener?.("change", check);
+    };
+  }, []);
+
+  const [splitAvailableWidth, setSplitAvailableWidth] = useState(0);
+  const isSplitEnabled = splitView && isWideOrFoldable && splitAvailableWidth >= 640;
+  const isSplitActive = isSplitEnabled && selectedTask !== null;
+
+  const toggleSplitView = () => {
+    setSplitView((prev) => {
+      const next = !prev;
+      localStorage.setItem("arshnaz_tasks_split_view", String(next));
+      return next;
+    });
+  };
+
+  const {
+    splitRatio,
+    isResizing: isSplitResizing,
+    containerRef: splitContainerRef,
+    handlePointerDown: handleSplitPointerDown,
+    handlePointerMove: handleSplitPointerMove,
+    handlePointerUp: handleSplitPointerUp,
+  } = useResizableSplit({
+    storageKey: "arshnaz_tasks_split_ratio",
+    defaultRatio: 48,
+    minRatio: 28,
+    maxRatio: 72,
+  });
+
+  // Fit both panels into the content area, including an expanded desktop sidebar.
+  useEffect(() => {
+    const container = splitContainerRef.current;
+    if (!container || typeof ResizeObserver === "undefined") return;
+    const measure = () => setSplitAvailableWidth(container.getBoundingClientRect().width);
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(container);
+    return () => observer.disconnect();
+  }, [splitContainerRef]);
+
+  useEffect(() => {
+    if (!selectedTask) return;
+    const current = allTasks.find((item) => item.id === selectedTask.id);
+    if (current && current !== selectedTask) setSelectedTask(current);
+  }, [allTasks, selectedTask]);
+  const [pomoTask, setPomoTask] = useState<Task | null>(null);
+  const [outcomeTask, setOutcomeTask] = useState<Task | null>(null);
+  const [outcomes, setOutcomes] = useState<TaskOutcome[]>([]);
+  const [outcomeOpen, setOutcomeOpen] = useState(false);
+  const [filterSheetOpen, setFilterSheetOpen] = useState(false);
+  const [goals, setGoals] = useState<GoalKanban[]>([]);
+
+  useEffect(() => {
+    if (!user?.id) return;
+    firebaseStore
+      .from("folders")
+      .select("id,name,color")
+      .order("position")
+      .then(({ data }) => {
+        const loadedFolders = (data || []) as any[];
+        setGoals(getAllKanbanGoals(loadedFolders, user.id));
+      });
+  }, [user?.id]);
+
+  // Inbox keeps its view choice in the same synced prefs store as folders.
+  const prefsId = scope === "folder" ? params.id : scope === "inbox" ? "inbox" : undefined;
+  useEffect(() => {
+    if (!prefsId) {
+      setFolderPrefs({ ...DEFAULT_FOLDER_PREFS });
+      return;
+    }
+    setFolderPrefs(getFolderPrefs(prefsId, user?.id));
+    const onPrefsUpdated = (event: Event) => {
+      const detail = (event as CustomEvent<{ folderId?: string; userId?: string; prefs?: FolderPrefs }>).detail;
+      if (detail?.folderId === prefsId && detail.userId === user?.id) {
+        setFolderPrefs(detail.prefs || getFolderPrefs(prefsId, user?.id));
+      }
+    };
+    window.addEventListener("arshnaz-folder-prefs-updated", onPrefsUpdated);
+    return () => window.removeEventListener("arshnaz-folder-prefs-updated", onPrefsUpdated);
+  }, [prefsId, user?.id]);
+
+  const [currentDayKey, setCurrentDayKey] = useState(() => getLocalDateString());
+  const [clockRevision, setClockRevision] = useState(0);
+  useEffect(() => {
+    const checkDay = () => {
+      setClockRevision(value => value + 1);
+      const nowKey = getLocalDateString();
+      if (nowKey !== currentDayKey) {
+        setCurrentDayKey(nowKey);
+        void load();
+      }
+    };
+    const onVisibility = () => {
+      if (!document.hidden) checkDay();
+    };
+    const onFocus = () => checkDay();
+    document.addEventListener("visibilitychange", onVisibility);
+    window.addEventListener("focus", onFocus);
+    const now = new Date();
+    const msUntilMidnight = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1, 0, 0, 1).getTime() - now.getTime();
+    const timer = setTimeout(checkDay, Math.max(1000, msUntilMidnight));
+    const clockTimer = window.setInterval(checkDay, 60000);
+    return () => {
+      document.removeEventListener("visibilitychange", onVisibility);
+      window.removeEventListener("focus", onFocus);
+      clearTimeout(timer);
+      window.clearInterval(clockTimer);
+    };
+  }, [currentDayKey, load]);
+
+  // Patch a task field optimistically + persist
+  const patchTask = useCallback(async (id: string, patch: Partial<Task>): Promise<TaskPersistenceStatus> => {
+    const ownerId = user?.id ?? null;
+    const target = effectiveAllTasks.find(t => t.id === id);
+    const owner = target ? target.user_id === ownerId : true;
+    const entityId = `${ownerId || "guest"}\u0000${id}`;
+    const version = beginTaskPatch(patchJournal.current, entityId, target || ({ id } as Task), patch);
+    const visualPatch: Partial<Task> = {};
+    if (Object.prototype.hasOwnProperty.call(patch, "priority")) visualPatch.priority = patch.priority;
+    if (Object.prototype.hasOwnProperty.call(patch, "due_date")) visualPatch.due_date = patch.due_date;
+    if (Object.prototype.hasOwnProperty.call(patch, "work_date")) visualPatch.work_date = patch.work_date;
+    // The single schedule travels as one unit, so the row never shows half of an old and half of a new plan.
+    for (const key of ["schedule_v", "planning_horizon", "planning_start", "planning_end", "planning_calendar", "due_at", "is_exact", "horizon", "period_start", "period_end", "bucket_kind", "bucket_anchor", "bucket_calendar"] as const) {
+      if (Object.prototype.hasOwnProperty.call(patch, key)) (visualPatch as Record<string, unknown>)[key] = patch[key];
+    }
+    if (owner && Object.keys(visualPatch).length) {
+      setVisualPatches(prev => ({ ...prev, [id]: { ...prev[id], ...visualPatch } }));
+    }
+    if (owner) setAllTasks(prev => prev.map(x => x.id === id ? { ...x, ...patch } as Task : x));
+
+    let status: TaskPersistenceStatus = "failed";
+    let errorMessage: string | null = null;
+    try {
+      if (ownerId) {
+        status = toSaveStatus(await persistTask(ownerId, { id, ...patch }));
+      } else if (typeof navigator !== "undefined" && !navigator.onLine) {
+        status = await enqueueOp({ table: "tasks", op: "update", payload: patch, match: { id } }) ? "queued" : "failed";
+      } else {
+        const { error } = await firebaseStore.from("tasks").update(patch as any).eq("id", id);
+        if (error) { status = "failed"; errorMessage = error.message; }
+        else status = "saved";
+      }
+    } catch (error) {
+      status = "failed";
+      errorMessage = error instanceof Error ? error.message : null;
+    }
+
+    const resolution = resolveTaskPatch(patchJournal.current, entityId, version, status !== "failed");
+    if (activeUserId.current === ownerId) {
+      setAllTasks(prev => prev.map(task => task.id === id ? applyPatchResolution(task, resolution) : task));
+      const visualKeys = Object.keys(visualPatch);
+      if (visualKeys.length) setVisualPatches(prev => {
+        const nextPatch: Partial<Task> = { ...prev[id] };
+        for (const key of visualKeys) {
+          if (Object.prototype.hasOwnProperty.call(resolution.values, key)) {
+            (nextPatch as Record<string, unknown>)[key] = resolution.values[key];
+          } else if (resolution.removed.includes(key)) {
+            delete (nextPatch as Record<string, unknown>)[key];
+          }
+        }
+        const next = { ...prev };
+        if (Object.keys(nextPatch).length) next[id] = nextPatch;
+        else delete next[id];
+        return next;
+      });
+    }
+
+    if (status === "failed") toast.error(errorMessage || T("ذخیره تغییرات ناموفق بود", "Could not save task changes"));
+    else {
+      if (status === "queued") toast.info(T("تغییر ذخیره شد؛ با اتصال اینترنت همگام می‌شود", "Saved locally — will sync when online"));
+      window.dispatchEvent(new Event("tasks-changed"));
+    }
+    return status;
+  }, [effectiveAllTasks, user?.id, setAllTasks, T]);
+
+  const applyOwnedTaskUndoPatch = async (task: Task, ownerId: string, patch: Partial<Task>) => {
+    if (task.user_id !== ownerId || activeUserId.current !== ownerId) {
+      throw new Error(T("برای بازگردانی وارد همان حساب مالک کار شوید", "Sign in to the task owner's account to undo this change"));
+    }
+    const currentTask = currentTasksRef.current.find((item) => item.id === task.id);
+    if (!currentTask || currentTask.user_id !== ownerId) {
+      throw new Error(T("این کار دیگر در حساب مالک پیدا نشد", "This task is no longer available in its owner's account"));
+    }
+    const status = await patchTask(task.id, patch);
+    if (status === "failed") throw new Error(T("ذخیرهٔ بازگردانی ناموفق بود", "Could not save the undo change"));
+  };
+
+  const taskStatePatch = (task: Task): Pick<Task, "completed" | "status" | "completed_at"> => ({
+    completed: Boolean(task.completed),
+    status: task.status || "todo",
+    completed_at: task.completed_at ?? null,
+  });
+
+  const patchTaskStateWithUndo = async (task: Task, patch: Partial<Task>): Promise<TaskPersistenceStatus> => {
+    const hasStateField = ["completed", "status", "completed_at"].some((key) => Object.prototype.hasOwnProperty.call(patch, key));
+    if (!hasStateField) return patchTask(task.id, patch);
+
+    const ownerId = task.user_id;
+    const currentTask = currentTasksRef.current.find((item) => item.id === task.id) || task;
+    const before: Partial<Task> = {
+      ...taskStatePatch(currentTask),
+      waiting_reason: currentTask.waiting_reason ?? null,
+    };
+    const after: Partial<Task> = { ...before, ...patch };
+    const result = await patchTask(task.id, patch);
+    if (result === "failed" || !ownerId || ownerId !== user?.id || activeUserId.current !== ownerId || task.user_id !== ownerId) return result;
+
+    const label = patch.status === "wont_do"
+      ? T(`کار «${task.title}» کنار گذاشته شد`, `Set aside "${task.title}"`)
+      : patch.status === "waiting"
+        ? T(`کار «${task.title}» منتظر ماند`, `Marked "${task.title}" as waiting`)
+        : patch.status === "in_progress"
+          ? T(`کار «${task.title}» شروع شد`, `Started "${task.title}"`)
+          : after.completed
+            ? T(`کار «${task.title}» انجام شد`, `Completed "${task.title}"`)
+            : T(`وضعیت کار «${task.title}» تغییر کرد`, `Changed status of "${task.title}"`);
+    pushUndo({
+      label,
+      undo: () => applyOwnedTaskUndoPatch(task, ownerId, before),
+      redo: () => applyOwnedTaskUndoPatch(task, ownerId, after),
+    });
+    return result;
+  };
+
+  const sensors = useSensors(
+    useSensor(PointerSensor, { activationConstraint: { distance: 5 } }),
+    useSensor(TouchSensor, { activationConstraint: { delay: 250, tolerance: 8 } }),
+  );
+  const SORT_KEY = "task_sort_v2";
+  const scopeKey = `${scope}:${params.id || "_"}`;
+  const loadSavedFilters = (): TaskFilters => {
+    try {
+      const raw = localStorage.getItem(SORT_KEY);
+      if (raw) {
+        const obj = JSON.parse(raw);
+        if (obj && obj[scopeKey]) {
+          const saved = obj[scopeKey];
+          // Merge into defaults so newly added fields are present
+          return {
+            ...DEFAULT_FILTERS,
+            ...saved,
+            ...readTaskListSort(scopeKey),
+            show_completed: getShowCompletedTasks(),
+          };
+        }
+      }
+    } catch { void 0; }
+    return { ...DEFAULT_FILTERS, ...readTaskListSort(scopeKey) };
+  };
+  const [filters, setFilters] = useState<TaskFilters>(loadSavedFilters);
+  useEffect(() => {
+    setFilters((current) => current.show_completed === showCompletedTasks
+      ? current
+      : { ...current, show_completed: showCompletedTasks });
+  }, [showCompletedTasks]);
+  const [filtersScope, setFiltersScope] = useState(scopeKey);
+  // Reload saved filters when scope/folder/tag changes
+  useEffect(() => {
+    setFilters(loadSavedFilters());
+    setFiltersScope(scopeKey);
+    const refresh = () => setFilters(loadSavedFilters());
+    window.addEventListener(TASK_LIST_SORT_EVENT, refresh);
+    window.addEventListener("storage", refresh);
+    return () => {
+      window.removeEventListener(TASK_LIST_SORT_EVENT, refresh);
+      window.removeEventListener("storage", refresh);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [scope, params.id]);
+  // Do not write the previous route’s filters into a newly opened scope.
+  useEffect(() => {
+    if (filtersScope !== scopeKey) return;
+    try {
+      const raw = localStorage.getItem(SORT_KEY);
+      const obj = raw ? JSON.parse(raw) : {};
+      const { sort_primary: _primary, sort_secondary: _secondary, ...filterValues } = filters;
+      obj[scopeKey] = { ...(obj[scopeKey] || {}), ...filterValues };
+      localStorage.setItem(SORT_KEY, JSON.stringify(obj));
+    } catch { void 0; }
+  }, [filters, scopeKey, filtersScope]);
+  const title = {
+    inbox: T("صندوق ورودی", "Inbox"), today: T("امروز", "Today"), tomorrow: T("فردا", "Tomorrow"), next7: T("۷ روز آینده", "Next 7 Days"),
+    smart: T("لیست‌های هوشمند", "Smart Lists"), folder: folderName || T("فولدر", "Folder"), tag: `#${tagName || T("تگ", "Tag")}`,
+  }[scope];
+
+  // Task lookup map
+  const taskMap = useMemo(() => new Map(effectiveAllTasks.map(t => [t.id, t])), [effectiveAllTasks]);
+
+  // Build children map
+  const childrenMap = useMemo(() => buildTaskChildrenMap(effectiveAllTasks), [effectiveAllTasks]);
+
+  const topLevel = useMemo(() => {
+    void currentDayKey;
+    void clockRevision;
+    return filterTopLevelTasksByScope({
+      effectiveAllTasks,
+      scope,
+      scopeId: params.id,
+      sourceFilter: searchParams.get("source"),
+      filters,
+      showCompletedTasks,
+      taskTagsMap,
+      graceMap,
+      taskMap,
+      goals,
+    });
+  }, [effectiveAllTasks, scope, params.id, filters, taskTagsMap, graceMap, taskMap, currentDayKey, clockRevision, showCompletedTasks, goals, searchParams]);
+
+  const [goalTint, setGoalTint] = useState<string | null>(null);
+  const isFolder = scope === "folder" && !!params.id;
+  const folderTopLevel = useMemo(
+    () => sortFolderTopLevelTasks(topLevel, isFolder, folderPrefs.sortOrder),
+    [folderPrefs.sortOrder, isFolder, topLevel],
+  );
+
+  // Date-based grouping for Today/Next7 to mimic TickTick (Overdue, Today, Tomorrow, ...)
+  const groupedTasks = useMemo(() => buildGroupedTasks(topLevel, scope, isEn, T), [topLevel, scope, isEn, T, clockRevision]);
+
+  const completeTaskCore = async (t: Task, outcome: TaskOutcome | null, isOwner: boolean) => {
+    const patch = { completed: true, status: "done" as const, completed_at: new Date().toISOString() };
+    if (isOwner) setAllTasks(prev => prev.map(x => x.id === t.id ? { ...x, ...patch } as Task : x));
+    if (!t.completed) {
+      playCompletionFeedback();
+      awardTaskWatering(t.title, Boolean(t.parent_id));
+    }
+
+    // Keep the completed task visible (with strikethrough) for a few seconds
+    keepCompletedTaskVisible(t.id);
+
+    if (user?.id) {
+      const status = await persistTask(user.id, { id: t.id, ...patch });
+      if (status === "failed") {
+        if (isOwner) setAllTasks(prev => prev.map(x => x.id === t.id ? t : x));
+        clearCompletedTaskGrace(t.id);
+        toast.error(T("تکمیل تسک با خطا مواجه شد", "Could not complete task"));
+        return;
+      }
+      if (status === "queued") {
+        toast.info(T("تغییر ذخیره شد؛ با اتصال اینترنت همگام می‌شود", "Saved locally — will sync when online"));
+      }
+      window.dispatchEvent(new Event("tasks-changed"));
+      await logTaskActivity(t.id, user.id, "completed", { ...patch, outcome_id: outcome?.id } as Record<string, unknown>).catch(() => {});
+      const ownerId = user.id;
+      if (isOwner && !t.completed && activeUserId.current === ownerId) {
+        const before = taskStatePatch(t);
+        const after = taskStatePatch({ ...t, ...patch } as Task);
+        pushUndo({
+          label: T(`کار «${t.title}» انجام شد`, `Completed "${t.title}"`),
+          undo: async () => {
+            await applyOwnedTaskUndoPatch(t, ownerId, before);
+            clearCompletedTaskGrace(t.id);
+          },
+          redo: async () => {
+            await applyOwnedTaskUndoPatch(t, ownerId, after);
+            keepCompletedTaskVisible(t.id);
+          },
+        });
+      }
+      return;
+    }
+
+    if (typeof navigator !== "undefined" && !navigator.onLine) {
+      await enqueueOp({ table: "tasks", op: "update", payload: patch, match: { id: t.id } });
+      toast.info(T("تغییر ذخیره شد؛ با اتصال اینترنت همگام می‌شود", "Saved locally — will sync when online"));
+      return;
+    }
+
+    try {
+      await firebaseStore.from("tasks").update(patch).eq("id", t.id);
+    } catch {}
+    if (!isOwner) setAllTasks(prev => prev.map(x => x.id === t.id ? { ...x, ...patch } as Task : x));
+  };
+
+  const completeTask = async (t: Task, outcome: TaskOutcome | null = null) => {
+    const isOwner = t.user_id === user?.id;
+
+    if (outcome && user) {
+      if (typeof navigator !== "undefined" && !navigator.onLine) {
+        toast.info(T("اتصال اینترنت برای اجرای سناریو لازم است", "Internet connection required to run outcome scenario"));
+      } else {
+        try {
+          await executeTaskOutcome(outcome, user.id, t);
+          toast.success(`${outcome.actions.length} ${T("تسک ساخته شد", "follow-up tasks created")}`);
+        } catch (e: any) {
+          toast.error(e.message || T("خطا در ساخت تسک‌ها", "Error creating tasks"));
+          return;
+        }
+      }
+    }
+
+    await completeTaskCore(t, outcome, isOwner);
+  };
+
+  const reopenTask = async (t: Task) => {
+    const isOwner = t.user_id === user?.id;
+    const patch = { completed: false, status: "todo" as const, completed_at: null as string | null };
+    if (isOwner) setAllTasks(prev => prev.map(x => x.id === t.id ? { ...x, ...patch } as Task : x));
+    // Cancel any pending grace for this task
+    clearCompletedTaskGrace(t.id);
+    setGraceTasks(prev => { const n = { ...prev }; delete n[t.id]; return n; });
+
+    if (user?.id) {
+      const status = await persistTask(user.id, { id: t.id, ...patch });
+      if (status === "failed") {
+        if (isOwner) setAllTasks(prev => prev.map(x => x.id === t.id ? t : x));
+        keepCompletedTaskVisible(t.id);
+        toast.error(T("بازگشایی تسک با خطا مواجه شد", "Could not reopen task"));
+        return;
+      }
+      if (status === "queued") {
+        toast.info(T("تغییر ذخیره شد؛ با اتصال اینترنت همگام می‌شود", "Saved locally — will sync when online"));
+      }
+      window.dispatchEvent(new Event("tasks-changed"));
+      await logTaskActivity(t.id, user.id, "reopened", patch as Record<string, unknown>).catch(() => {});
+      const ownerId = user.id;
+      if (isOwner && activeUserId.current === ownerId) {
+        const before = taskStatePatch(t);
+        const after = taskStatePatch({ ...t, ...patch } as Task);
+        pushUndo({
+          label: T(`کار «${t.title}» باز شد`, `Reopened "${t.title}"`),
+          undo: async () => {
+            await applyOwnedTaskUndoPatch(t, ownerId, before);
+            keepCompletedTaskVisible(t.id);
+          },
+          redo: async () => {
+            await applyOwnedTaskUndoPatch(t, ownerId, after);
+            clearCompletedTaskGrace(t.id);
+          },
+        });
+      }
+      return;
+    }
+
+    if (typeof navigator !== "undefined" && !navigator.onLine) {
+      await enqueueOp({ table: "tasks", op: "update", payload: patch, match: { id: t.id } });
+      toast.info(T("تغییر ذخیره شد؛ با اتصال اینترنت همگام می‌شود", "Saved locally — will sync when online"));
+      return;
+    }
+
+    try {
+      await firebaseStore.from("tasks").update(patch).eq("id", t.id);
+    } catch {}
+    if (!isOwner) setAllTasks(prev => prev.map(x => x.id === t.id ? { ...x, ...patch } as Task : x));
+  };
+
+  const toggleTask = async (t: Task) => {
+    const newCompleted = !t.completed;
+    if (newCompleted && isLeitnerStudyTask(t)) {
+      navigate(getStudyTaskNavigation(t).navUrl);
+      return;
+    }
+
+    if (!newCompleted) {
+      await reopenTask(t);
+      return;
+    }
+
+    if (isRecurringTask(t) && user?.id) {
+      awardTaskWatering(t.title, Boolean(t.parent_id));
+      const res = await advanceRecurringTask(user.id, t, { allKnownTasks: allTasks });
+      if (res.success && res.patch) {
+        if (t.user_id === user.id) {
+          setAllTasks((prev) => prev.map((x) => (x.id === t.id ? ({ ...x, ...res.patch } as Task) : x)));
+        }
+        toast.success(
+          T(
+            `نمونه بعدی به ${res.formattedNextDate} منتقل شد 🔁`,
+            `Next instance moved to ${res.formattedNextDate} 🔁`
+          )
+        );
+        return;
+      }
+      toast.error(T("نمونهٔ بعدی ذخیره نشد؛ کار انجام‌شده نشد. دوباره تلاش کنید.", "The next occurrence could not be saved. The task remains open; please retry."));
+      return;
+    }
+
+    try {
+      const outs = await listTaskOutcomes(t.id);
+      if (outs.length > 0) {
+        setOutcomeTask(t);
+        setOutcomes(outs);
+        setOutcomeOpen(true);
+        return;
+      }
+    } catch (e) {
+      // No outcomes or network error; proceed to normal completion.
+    }
+
+    await completeTask(t);
+  };
+
+  const swipeTask = async (task: Task, action: TaskSwipeAction) => {
+    if (task.user_id !== user?.id || action === "none") return;
+    if (action === "menu") { setActionTask(task); return; }
+    if (action === "complete") { await toggleTask(task); return; }
+    const ownerId = user.id;
+    const inverse = schedulePatch(readSchedule(task));
+    const patch = moveTaskDayPatch(task, getLocalDateString(addDays(new Date(), action === "tomorrow" ? 1 : 0)));
+    const result = await patchTask(task.id, patch);
+    if (result === "failed" || activeUserId.current !== ownerId) return;
+    pushUndo({
+      label: action === "today" ? T("کار به امروز منتقل شد", "Task scheduled for today") : T("کار به فردا منتقل شد", "Task scheduled for tomorrow"),
+      undo: () => applyOwnedTaskUndoPatch(task, ownerId, inverse),
+      redo: () => applyOwnedTaskUndoPatch(task, ownerId, patch),
+    });
+  };
+
+  useEffect(() => {
+    const taskId = searchParams.get("completeTaskId");
+    if (!taskId) { completionLinkRef.current = null; return; }
+    if (completionLinkRef.current === taskId) return;
+    const target = effectiveAllTasks.find((task) => task.id === taskId);
+    if (!target) return;
+    completionLinkRef.current = taskId;
+    const nextParams = new URLSearchParams(searchParams);
+    nextParams.delete("completeTaskId");
+    if (isLeitnerStudyTask(target) && !target.completed) {
+      navigate(getStudyTaskNavigation(target).navUrl, { replace: true });
+      return;
+    }
+    if (!target.completed) void toggleTask(target);
+    setSearchParams(nextParams, { replace: true });
+  }, [effectiveAllTasks, searchParams, setSearchParams, navigate, toggleTask]);
+
+  const delTask = async (id: string): Promise<boolean> => {
+    if (!user?.id) return false;
+    const ownerId = user.id;
+    const target = effectiveAllTasks.find(t => t.id === id);
+    if (target && target.user_id !== user.id) {
+      toast(T("فقط صاحب تسک می‌تواند حذف کند", "Only the task owner can delete"));
+      return false;
+    }
+    const allDescendantIds = collectTaskDescendantIds(id, childrenMap);
+    const snaps = allTasks.filter(t => allDescendantIds.includes(t.id));
+    const previousTasks = allTasks;
+    const until = Date.now() + GRACE_MS;
+    const ghosts: Record<string, Task & { _graceUntil: number }> = {};
+    for (const s of snaps) {
+      ghosts[s.id] = { ...s, completed: true, status: "done" as TaskStatus, _graceUntil: until };
+    }
+    setAllTasks(prev => prev.filter(t => !allDescendantIds.includes(t.id)));
+    setGraceTasks(prev => ({ ...prev, ...ghosts }));
+    setGraceMap(prev => ({ ...prev, ...Object.fromEntries(allDescendantIds.map(i => [i, until])) }));
+    window.setTimeout(() => {
+      setGraceTasks(prev => { const n = { ...prev }; allDescendantIds.forEach(i => delete n[i]); return n; });
+      setGraceMap(prev => { const n = { ...prev }; allDescendantIds.forEach(i => delete n[i]); return n; });
+    }, GRACE_MS);
+
+    // The cascade owns its own recovery snapshot (server-confirmed online), so
+    // restore can rebuild every affected row instead of only the current view.
+    const res = await deleteTaskCascade(ownerId, id, allTasks, { recoverable: true });
+    if (!res.success) {
+      setAllTasks(previousTasks);
+      setGraceTasks(prev => { const next = { ...prev }; allDescendantIds.forEach(taskId => delete next[taskId]); return next; });
+      setGraceMap(prev => { const next = { ...prev }; allDescendantIds.forEach(taskId => delete next[taskId]); return next; });
+      toast.error(T("حذف انجام نشد؛ برای تهیه نسخهٔ بازگردانی، به اینترنت وصل شوید و همگام‌سازی را کامل کنید.", "Nothing was deleted. Connect and finish syncing so the recovery snapshot can be verified."));
+      return false;
+    }
+
+    const title = snaps.find(s => s.id === id)?.title || target?.title || "";
+    const recovery = res.recovery;
+    const recoverTasks = recovery?.tasks?.length ? recovery.tasks : snaps;
+    const recoverTagLinks = recovery?.tagLinks ?? null;
+    const recoverKnowledgeLinks = recovery?.knowledgeLinks ?? [];
+    const recoverNoteTaskLinks = recovery?.noteTaskLinks ?? [];
+
+    // Verify every restored row; a partial failure keeps the recovery entry so
+    // the user can retry from Recently Deleted.
+    const restore = async (): Promise<boolean> => {
+      const statuses = await Promise.all(recoverTasks.map(s => persistTask(ownerId, s)));
+      if (statuses.some(status => status !== "saved" && status !== "queued")) return false;
+      try {
+        if (recoverTagLinks?.length) {
+          const { error } = await firebaseStore.from("task_tags").insert(recoverTagLinks as never);
+          if (error) return false;
+        }
+      } catch { return false; }
+      try {
+        if (recoverKnowledgeLinks.length) {
+          const { error } = await firebaseStore.from("task_knowledge_links").insert(recoverKnowledgeLinks as never);
+          if (error) return false;
+        }
+      } catch { return false; }
+      try {
+        if (recoverNoteTaskLinks.length) {
+          const { error } = await firebaseStore.from("note_task_links").insert(recoverNoteTaskLinks as never);
+          if (error) return false;
+        }
+      } catch { return false; }
+      load();
+      return true;
+    };
+    pushUndo({ importance: "delete", label: T(`تسک «${title}» حذف شد`, `Task "${title}" deleted`), undo: async () => {
+      if (activeUserId.current !== ownerId) throw new Error(T("برای بازگردانی وارد همان حساب شوید", "Sign in to the same account to restore"));
+      if (!await restore()) throw new Error(T("بازگردانی کامل نشد؛ دوباره تلاش کنید", "Recovery was incomplete; try again"));
+    } });
+    if (recovery) {
+      if (!pushDeletedTask(ownerId, title, recovery)) toast.warning(T("بازگردانی فقط تا ۱۰ دقیقه در همین نشست ممکن است؛ با بارگذاری مجدد از دست می‌رود.", "Recovery is available for 10 minutes in this session only; reloading loses it."));
+    } else pushDeleted({ kind: "task", label: title, ownerId, restore });
+    return true;
+  };
+
+  const askDeleteTask = (t: Task) => {
+    if (t.user_id !== user?.id) {
+      toast(T("فقط صاحب تسک می‌تواند حذف کند", "Only the task owner can delete"));
+      return;
+    }
+    const allDescendantIds = collectTaskDescendantIds(t.id, childrenMap);
+    const childCount = allDescendantIds.filter(i => i !== t.id).length;
+    setConfirm({
+      kind: "task",
+      id: t.id,
+      title: t.title,
+      childCount,
+      onConfirm: async () => delTask(t.id),
+    });
+  };
+
+  // Compute progress including nested descendants.
+  const getProgress = (id: string): { done: number; total: number } =>
+    getTaskProgress(id, childrenMap);
+
+  // Drag & drop: drop a task onto another → set as child; drop in same parent zone → reorder
+  const onDragEnd = async (e: DragEndEvent) => {
+    setActiveDragId(null);
+    // Date-grouped views (Today/Next7) sort tasks by due date; manual reorder is disabled there.
+    if (scope === "today" || scope === "next7") return;
+    const { active, over, delta } = e;
+    if (!over || active.id === over.id) return;
+    const activeId = String(active.id);
+    const overId = String(over.id);
+    const activeTask = effectiveAllTasks.find(t => t.id === activeId);
+    if (!activeTask) return;
+
+    // Helper: when promoting a task to top-level, also fill scope-defining fields
+    // so it doesn't disappear from the current view.
+    const scopeRootPatch = (): Record<string, any> => {
+      const sc = scope as string;
+      const patch: Record<string, any> = { parent_id: null };
+      const today = getLocalDateString();
+      const tomorrowIso = getLocalDateString(addDays(new Date(), 1));
+      if (sc === "today") patch.work_date = today;
+      else if (sc === "tomorrow") patch.work_date = tomorrowIso;
+      else if (sc === "next7" && !taskWorkDate(activeTask)) patch.work_date = tomorrowIso;
+      if (patch.work_date) Object.assign(patch, workDatePatch(activeTask, patch.work_date));
+      else if (sc === "folder") patch.folder_id = params.id || null;
+      return patch;
+    };
+
+    if (overId.startsWith("child:")) {
+      const newParent = overId.slice(6);
+      if (newParent === activeId) return;
+      // prevent cycles
+      let p: string | null = newParent;
+      while (p) {
+        if (p === activeId) { toast.error(T("نمی‌توان داخل خودش انداخت", "Cannot move a task into itself")); return; }
+        const pt = effectiveAllTasks.find(x => x.id === p);
+        p = pt?.parent_id || null;
+      }
+      setAllTasks(prev => prev.map(t => t.id === activeId ? { ...t, parent_id: newParent } : t));
+      setExpanded(s => ({ ...s, [newParent]: true }));
+      const { error } = await firebaseStore.from("tasks").update({ parent_id: newParent }).eq("id", activeId);
+      if (error) toast.error(error.message);
+      return;
+    }
+    if (overId === "root") {
+      const patch = scopeRootPatch();
+      setAllTasks(prev => prev.map(t => t.id === activeId ? { ...t, ...patch } as Task : t));
+      const { error } = await firebaseStore.from("tasks").update(patch as any).eq("id", activeId);
+      if (error) toast.error(error.message);
+      return;
+    }
+    // Dropped on another task row
+    const overTask = effectiveAllTasks.find(t => t.id === overId);
+    if (!overTask) return;
+
+    // TickTick-style: if user dragged horizontally significantly, treat as INDENT
+    // (make active a subtask of over) instead of reorder.
+    const HORIZONTAL_INDENT = 40;
+    if (delta && Math.abs(delta.x) > HORIZONTAL_INDENT && Math.abs(delta.x) > Math.abs(delta.y)) {
+      // prevent cycles
+      let p: string | null = overId;
+      while (p) {
+        if (p === activeId) { toast.error(T("نمی‌توان داخل خودش انداخت", "Cannot move a task into itself")); return; }
+        const pt = effectiveAllTasks.find(x => x.id === p);
+        p = pt?.parent_id || null;
+      }
+      setAllTasks(prev => prev.map(t => t.id === activeId ? { ...t, parent_id: overId } : t));
+      setExpanded(s => ({ ...s, [overId]: true }));
+      const { error } = await firebaseStore.from("tasks").update({ parent_id: overId }).eq("id", activeId);
+      if (error) toast.error(error.message);
+      return;
+    }
+
+    // Otherwise: reorder among siblings (or move to over's parent if different)
+    const siblings = overTask.parent_id
+      ? (childrenMap[overTask.parent_id] || [])
+      : topLevel;
+    const fromIdx = siblings.findIndex(s => s.id === activeId);
+    const toIdx = siblings.findIndex(s => s.id === overId);
+    if (activeTask.parent_id !== overTask.parent_id) {
+      // Moving across parents. If target is top-level (no parent), inherit scope.
+      const patch: Record<string, any> = overTask.parent_id
+        ? { parent_id: overTask.parent_id }
+        : scopeRootPatch();
+      setAllTasks(prev => prev.map(t => t.id === activeId ? { ...t, ...patch } as Task : t));
+      await firebaseStore.from("tasks").update(patch as any).eq("id", activeId);
+      return;
+    }
+    if (fromIdx < 0 || toIdx < 0) return;
+    const reordered = arrayMove(siblings, fromIdx, toIdx);
+    const updates = reordered.map((s, i) =>
+      firebaseStore.from("tasks").update({ position: i }).eq("id", s.id)
+    );
+    setAllTasks(prev => {
+      const map = new Map(reordered.map((s, i) => [s.id, i]));
+      return [...prev].sort((a, b) => {
+        const ai = map.get(a.id); const bi = map.get(b.id);
+        if (ai !== undefined && bi !== undefined) return ai - bi;
+        return 0;
+      }).map(t => map.has(t.id) ? { ...t, position: map.get(t.id)! } : t);
+    });
+    await Promise.all(updates);
+  };
+
+  const moveSibling = async (t: Task, dir: -1 | 1) => {
+    const siblings = t.parent_id ? (childrenMap[t.parent_id] || []) : topLevel;
+    const idx = siblings.findIndex(s => s.id === t.id);
+    const newIdx = idx + dir;
+    if (idx < 0 || newIdx < 0 || newIdx >= siblings.length) return;
+    const reordered = arrayMove(siblings, idx, newIdx);
+    const map = new Map(reordered.map((s, i) => [s.id, i]));
+    setAllTasks(prev => prev.map(x => map.has(x.id) ? { ...x, position: map.get(x.id)! } : x));
+    await Promise.all(reordered.map((s, i) =>
+      firebaseStore.from("tasks").update({ position: i }).eq("id", s.id)
+    ));
+  };
+
+  const renderTaskItem = (t: Task, depth = 0) => (
+    <TaskListItem
+      key={t.id}
+      t={t}
+      depth={depth}
+      subs={childrenMap[t.id] || []}
+      open={!!expanded[t.id]}
+      onToggleExpand={(id) => setExpanded(s => ({ ...s, [id]: !s[id] }))}
+      progress={getProgress(t.id)}
+      parent={t.parent_id ? taskMap.get(t.parent_id) : null}
+      onSelectTask={(task) => {
+        if (task.parent_id) {
+          const parent = allTasks.find(p => p.id === task.parent_id);
+          if (parent) {
+            setSelectedTaskHistory([parent]);
+            setSelectedTask(task);
+            return;
+          }
+        }
+        setSelectedTaskHistory([]);
+        setSelectedTask(task);
+      }}
+      onToggleTask={toggleTask}
+      onActionTask={setActionTask}
+      onDeleteTask={askDeleteTask}
+      onPatchTask={patchTask}
+      onSwipeTask={swipeTask}
+      onMoveTask={setMoveTask}
+      userId={user?.id}
+      isSelected={selectedTask?.id === t.id}
+      splitView={isSplitActive}
+      layout={layout}
+      isEn={isEn}
+      T={T}
+      navigate={navigate}
+      outcomeByTaskId={outcomeByTaskId}
+      outcomeById={outcomeById}
+      childrenMap={childrenMap}
+      expanded={expanded}
+      getProgress={getProgress}
+      taskMap={taskMap}
+      allowDrag={scope !== "today" && scope !== "next7"}
+      showCompletedTasks={showCompletedTasks}
+    />
+  );
+
+
+  const showProfileBar =
+    scope === "smart" ||
+    (filters.folder_ids?.length || 0) +
+      (filters.tag_ids?.length || 0) +
+      (filters.goal_ids?.length || 0) +
+      (filters.priorities?.length || 0) +
+      (filters.time_horizons?.length || 0) +
+      (filters.due_windows?.length || 0) >
+      0;
+
+  const listView = (
+    <TasksListViewSection
+      scope={scope}
+      scopeId={params.id}
+      scopeKey={scopeKey}
+      folderName={folderName}
+      filters={filters}
+      setFilters={setFilters}
+      filterSheetOpen={filterSheetOpen}
+      setFilterSheetOpen={setFilterSheetOpen}
+      showProfileBar={showProfileBar}
+      folderTopLevel={folderTopLevel}
+      groupedTasks={groupedTasks}
+      sensors={sensors}
+      activeDragId={activeDragId}
+      setActiveDragId={setActiveDragId}
+      onDragEnd={onDragEnd}
+      hasLoadError={hasLoadError}
+      loadErrorMessage={loadErrorMessage}
+      isReady={isReady}
+      effectiveAllTasks={effectiveAllTasks}
+      taskMap={taskMap}
+      renderTaskItem={renderTaskItem}
+      load={load}
+      isEn={isEn}
+      T={T}
+    />
+  );
+
+  const planningBoard = prefsId ? (
+    <PlanningBoard compact settings={getTimeSettings()} fa={!isEn}
+      tasks={planningScopeTasks(effectiveAllTasks, effectiveAllTasks.filter(task => !task.parent_id && (scope === "folder" ? task.folder_id === params.id : !task.folder_id)).map(task => task.id))}
+      onToggle={toggleTask} onUpdate={patchTask} onOpen={task => { setSelectedTaskHistory([]); setSelectedTask(task); }}
+      defaults={{ folder_id: scope === "folder" ? params.id : null }} onCreated={() => void load()} />
+  ) : null;
+  const planningListView = folderPrefs.view === "buckets" && planningBoard ? planningBoard : listView;
+
+  const updateFolderPrefs = (patch: Partial<FolderPrefs>) => {
+    if (!prefsId) return;
+    const next = { ...folderPrefs, ...patch };
+    setFolderPrefs(next);
+    saveFolderPrefs(prefsId, next, user?.id);
+  };
+
+  return (
+    <div
+      className={`p-2 sm:p-3 md:p-4 lg:px-5 xl:px-7 lg:py-5 w-full mx-auto relative${isFolder ? " min-h-screen" : ""}${isFolder && folderPrefs.bgColor ? " folder-tint" : ""}`}
+      style={isFolder && folderPrefs.bgColor ? ({ "--folder-bg": folderPrefs.bgColor } as CSSProperties) : undefined}
+    >
+      <HeaderActionsPortal>
+              {prefsId && (
+                <ListViewSwitch value={folderPrefs.view} allowKanban={isFolder} fa={!isEn} onChange={(view) => updateFolderPrefs({ view })} />
+              )}
+              <Button
+                variant={isSplitEnabled ? "secondary" : "ghost"}
+                size="icon"
+                onClick={toggleSplitView}
+                className="hidden h-9 w-9 rounded-xl text-muted-foreground md:inline-flex"
+                disabled={!isWideOrFoldable || splitAvailableWidth < 640}
+                aria-pressed={isSplitEnabled}
+                aria-label={splitView ? T("حالت تمام‌صفحه", "Full width") : T("نمای دوپنله", "Split view")}
+                title={splitAvailableWidth < 640 ? T("برای نمای دوپنله، عرض پنجره را بیشتر کنید", "Widen the window to use split view") : splitView ? T("حالت تمام‌صفحه", "Full width") : T("نمای دوپنله (نیمه چپ)", "Split view (left panel)")}
+                data-testid="tasks-toggle-split"
+              >
+                <Columns2 className="w-4 h-4" />
+              </Button>
+      </HeaderActionsPortal>
+      {isFolder && folderPrefs.bgImage && (
+        <div
+          aria-hidden
+          data-testid="folder-bg-image"
+          className="pointer-events-none absolute inset-0 z-0 bg-cover bg-center opacity-[0.16] dark:opacity-[0.12]"
+          style={{ backgroundImage: /^https?:|^data:|^blob:/.test(folderPrefs.bgImage) ? `url("${folderPrefs.bgImage}")` : folderPrefs.bgImage }}
+        />
+      )}
+      {isFolder && goalTint && folderPrefs.view.startsWith("kanban") && (
+        <div aria-hidden data-testid="folder-goal-tint" className="pointer-events-none absolute inset-0 z-0 transition-colors duration-300"
+          style={{ background: `linear-gradient(135deg, color-mix(in srgb, ${goalTint} 20%, transparent), color-mix(in srgb, ${goalTint} 8%, transparent))` }} />
+      )}
+      <div className="relative z-10">
+        <TasksHeader
+          title={title}
+          isFolder={isFolder}
+          folderName={folderName}
+          folderPrefs={folderPrefs}
+          updateFolderPrefs={updateFolderPrefs}
+          setDelFolderOpen={setDelFolderOpen}
+          T={T}
+        />
+
+        <div
+          ref={splitContainerRef}
+          data-task-split={isSplitActive ? "true" : "false"}
+          dir="ltr"
+          className={`w-full items-start gap-2 sm:gap-3 xl:gap-4 ${
+            isSplitActive
+              ? "flex flex-row items-stretch"
+              : "flex flex-col"
+          } ${isSplitResizing ? "select-none cursor-col-resize" : ""}`}
+        >
+          {/* Explicit LTR placement keeps the inspector on the physical left:
+              sidebar/folders live on the right, the list remains central/right. */}
+          {isSplitActive && selectedTask && (
+            <aside
+              dir={isEn ? "ltr" : "rtl"}
+              style={{ width: `clamp(280px, ${splitRatio}%, calc(100% - 320px))` }}
+              className={`shrink-0 min-w-[280px] max-w-[75%] sticky top-[3.75rem] sm:top-[4.25rem] h-[calc(100dvh-7.5rem)] sm:h-[calc(100dvh-8rem)] xl:h-[calc(100dvh-7.2rem)] overflow-hidden ${
+                isSplitResizing ? "transition-none" : "transition-[width] duration-150 ease-out"
+              }`}
+            >
+              <TaskDetail
+                  key={selectedTask.id}
+                  task={selectedTask}
+                  mode="embedded"
+                  onClose={() => {
+                    setSelectedTaskHistory([]);
+                    setSelectedTask(null);
+                  }}
+                  onChanged={load}
+                  setConfirm={setConfirm}
+                  allowDelete
+                  onOpenParentTask={handleOpenParentInDrawer}
+                  onBack={selectedTaskHistory.length > 0 ? handleBackInDrawer : undefined}
+                  hasBackHistory={selectedTaskHistory.length > 0}
+                />
+            </aside>
+          )}
+
+          {/* Draggable splitter handle */}
+          {isSplitActive && selectedTask && (
+            <div
+              role="separator"
+              aria-orientation="vertical"
+              aria-label={T("تغییر عرض ستون‌ها", "Resize columns")}
+              onPointerDown={handleSplitPointerDown}
+              onPointerMove={handleSplitPointerMove}
+              onPointerUp={handleSplitPointerUp}
+              onPointerCancel={handleSplitPointerUp}
+              className="w-3 -mx-1 shrink-0 h-[calc(100dvh-7.5rem)] sm:h-[calc(100dvh-8rem)] xl:h-[calc(100dvh-7.2rem)] sticky top-[3.75rem] sm:top-[4.25rem] flex items-center justify-center cursor-col-resize group/splitter select-none touch-none z-10 hover:w-3.5 transition-all"
+              title={T("بکشید برای تنظیم عرض دو ستون", "Drag to resize columns")}
+            >
+              <div className="w-1 h-12 rounded-full bg-border/80 group-hover/splitter:bg-primary group-hover/splitter:h-16 group-active/splitter:bg-primary group-active/splitter:h-20 transition-all shadow-xs" />
+            </div>
+          )}
+
+          <section
+            dir={isEn ? "ltr" : "rtl"}
+            className={`w-full min-w-0 rounded-2xl border border-border/60 bg-card/35 p-2 sm:p-3 lg:p-4 shadow-sm ${
+              isSplitActive
+                ? "flex-1 h-[calc(100dvh-7.5rem)] sm:h-[calc(100dvh-8rem)] xl:h-[calc(100dvh-7.2rem)] overflow-y-auto overscroll-contain pb-6"
+                : "pb-16"
+            }`}
+          >
+            {isFolder ? (
+              folderPrefs.view === "list" || folderPrefs.view === "buckets" ? (
+                planningListView
+              ) : (
+                <FolderKanban
+                  folderId={params.id!}
+                  onGoalColorChange={setGoalTint}
+                  layout={folderPrefs.view === "kanban-columns" ? "columns" : "stream"}
+                  sortOrder={folderPrefs.sortOrder}
+                  onOpenTask={(id) => {
+                    const found = effectiveAllTasks.find(x => x.id === id);
+                    if (found) setSelectedTask(found);
+                    else navigate(`/app/tasks/${id}`);
+                  }}
+                />
+              )
+            ) : (
+              planningListView
+            )}
+          </section>
+
+        </div>
+
+      <TaskDeleteConfirmDialog confirm={confirm} setConfirm={setConfirm} T={T} />
+
+      {moveTask && (
+        <MoveToDialog
+          open={!!moveTask}
+          onOpenChange={(v) => !v && setMoveTask(null)}
+          kind="task"
+          itemId={moveTask.id}
+          currentFolderId={moveTask.folder_id}
+          onMoved={() => { load(); setMoveTask(null); }}
+        />
+      )}
+
+      {makeChildOf && (
+        <MakeChildDialog
+          open={!!makeChildOf}
+          onOpenChange={(v) => !v && setMakeChildOf(null)}
+          task={makeChildOf}
+          allTasks={effectiveAllTasks}
+          onDone={(newParentId) => {
+            setAllTasks(prev => prev.map(x => x.id === makeChildOf!.id ? { ...x, parent_id: newParentId } : x));
+            if (newParentId) setExpanded(s => ({ ...s, [newParentId]: true }));
+          }}
+        />
+      )}
+
+      {isFolder && delFolderOpen && (
+        <FolderDeleteDialog
+          open={delFolderOpen}
+          onOpenChange={setDelFolderOpen}
+          folderId={params.id!}
+          folderName={folderName}
+          onDone={() => { setDelFolderOpen(false); navigate("/app/inbox"); }}
+        />
+      )}
+
+      {selectedTask && !isSplitActive && (
+        <TaskDetail
+          key={selectedTask.id}
+          task={selectedTask}
+          mode="drawer"
+          onClose={() => {
+            setSelectedTaskHistory([]);
+            setSelectedTask(null);
+          }}
+          onChanged={load}
+          setConfirm={setConfirm}
+          allowDelete
+          onOpenParentTask={handleOpenParentInDrawer}
+          onBack={selectedTaskHistory.length > 0 ? handleBackInDrawer : undefined}
+          hasBackHistory={selectedTaskHistory.length > 0}
+        />
+      )}
+
+      <TaskActionSheet
+        task={actionTask}
+        onOpenChange={(v) => !v && setActionTask(null)}
+        onComplete={() => actionTask && toggleTask(actionTask)}
+        onDelete={() => actionTask && askDeleteTask(actionTask)}
+        onMove={() => actionTask && setMoveTask(actionTask)}
+        onMakeChild={() => actionTask && setMakeChildOf(actionTask)}
+        onPatch={(patch) => actionTask ? patchTaskStateWithUndo(actionTask, patch) : Promise.resolve("failed")}
+        onPomodoro={() => actionTask && setPomoTask(actionTask)}
+        onEdit={() => actionTask && setSelectedTask(actionTask)}
+        onRefresh={load}
+      />
+
+      <PomodoroSheet
+        task={pomoTask}
+        open={!!pomoTask}
+        onOpenChange={(v) => !v && setPomoTask(null)}
+      />
+
+      <OutcomePicker
+        outcomes={outcomes}
+        open={outcomeOpen}
+        onOpenChange={setOutcomeOpen}
+        onSelect={(outcome) => {
+          setOutcomeOpen(false);
+          if (outcomeTask) {
+            if (outcome) completeTask(outcomeTask, outcome);
+            else completeTask(outcomeTask);
+          }
+        }}
+      />
+      </div>
+    </div>
+  );
+}

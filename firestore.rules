@@ -1,0 +1,246 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Helper functions
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+
+    function folderIsOpen(userId, folderId) {
+      return folderId == null || (folderId is string
+        && exists(/databases/$(database)/documents/users/$(userId)/folders/$(folderId))
+        && get(/databases/$(database)/documents/users/$(userId)/folders/$(folderId)).data.get('_deleting', false) != true);
+    }
+
+    function folderIsLocked(userId, folderId) {
+      return folderId is string
+        && exists(/databases/$(database)/documents/users/$(userId)/folders/$(folderId))
+        && get(/databases/$(database)/documents/users/$(userId)/folders/$(folderId)).data.get('_deleting', false) == true;
+    }
+
+    function taskIsOpen(userId, taskId) {
+      return taskId == null || (taskId is string
+        && exists(/databases/$(database)/documents/users/$(userId)/tasks/$(taskId))
+        && get(/databases/$(database)/documents/users/$(userId)/tasks/$(taskId)).data.get('_deleting', false) != true);
+    }
+
+    function deleteMarkersUnchanged() {
+      return request.resource.data.get('_deleting', false) == resource.data.get('_deleting', false)
+        && request.resource.data.get('_delete_lock', null) == resource.data.get('_delete_lock', null);
+    }
+
+    function hasNoDeleteMarker(data) {
+      return data.get('_deleting', false) != true && data.get('_delete_lock', null) == null;
+    }
+
+    function acquireDeleteLock() {
+      return resource.data.get('_deleting', false) != true
+        && request.resource.data.get('_deleting', false) == true
+        && request.resource.data.get('_delete_lock', null) is string
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['_deleting', '_delete_lock']);
+    }
+
+    function releaseDeleteLock() {
+      return resource.data.get('_deleting', false) == true
+        && resource.data.get('_delete_lock', null) is string
+        && request.resource.data.get('_deleting', false) == false
+        && request.resource.data.get('_delete_lock', null) == resource.data.get('_delete_lock', null)
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['_deleting', '_delete_lock']);
+    }
+
+    function safeFolderDetach(userId, field) {
+      return request.resource.data.get(field, null) == null
+        && folderIsLocked(userId, resource.data.get(field, null))
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+          field, 'created_at', 'updated_at', 'updatedAt', '_firestoreSyncAt', 'id', 'user_id', 'userId'
+        ]);
+    }
+
+    function folderReferenceUpdateAllowed(userId, field) {
+      let oldFolder = resource.data.get(field, null);
+      let newFolder = request.resource.data.get(field, null);
+      return (folderIsOpen(userId, oldFolder) && folderIsOpen(userId, newFolder))
+        || (newFolder == null && safeFolderDetach(userId, field));
+    }
+
+    // Health diagnostics are scoped to the authenticated user's private tree.
+    match /_health/{docId} {
+      allow read, write: if false;
+    }
+
+    // User profile and private subcollections
+    match /users/{userId} {
+      allow read, write: if isOwner(userId);
+
+      // Disallow client writes to user_roles subcollection.
+      // Roles must never be self-assigned or altered by client-side writes.
+      match /user_roles/{docId=**} {
+        allow read: if isOwner(userId);
+        allow write: if false;
+      }
+
+      // Assistant grants and audit records are managed only by trusted server code.
+      match /assistant_grants/{docId=**} {
+        allow read, write: if false;
+      }
+      match /assistant_audit/{docId=**} {
+        allow read, write: if false;
+      }
+      // API create receipts can contain responses needed for idempotent retries.
+      // They are private server records and must never be read or changed by a client.
+      match /assistant_idempotency/{docId=**} {
+        allow read, write: if false;
+      }
+      match /assistant_trash/{docId=**} {
+        allow read, write: if false;
+      }
+
+      // Retired modules must not repopulate user data on an older client.
+      // Keep owner reads for migration diagnostics and owner deletes for the
+      // bounded cleanup flow; all client create/update operations are blocked.
+      match /pharmacy_practice/{docId=**} {
+        allow read, delete: if isOwner(userId);
+        allow create, update: if false;
+      }
+      match /leitner_reviews/{docId=**} {
+        allow read, delete: if isOwner(userId);
+        allow create, update: if false;
+      }
+
+      // Permanent, non-sensitive deletion markers fence both old clients and concurrent batches.
+      match /cycle_profile_tombstones/{profileId} {
+        allow read: if isOwner(userId);
+        allow create: if isOwner(userId)
+          && request.resource.data.keys().hasOnly(['deleted', 'requested_at'])
+          && request.resource.data.deleted == true;
+        allow update, delete: if false;
+      }
+      match /cycle_profiles/{profileId} {
+        allow read: if isOwner(userId);
+        allow create, update: if isOwner(userId)
+          && !existsAfter(/databases/$(database)/documents/users/$(userId)/cycle_profile_tombstones/$(profileId));
+        allow delete: if isOwner(userId)
+          && exists(/databases/$(database)/documents/users/$(userId)/cycle_profile_tombstones/$(profileId));
+      }
+      match /cycle_logs/{logId} {
+        allow read, delete: if isOwner(userId);
+        allow create, update: if isOwner(userId)
+          && request.resource.data.profile_id is string
+          && existsAfter(/databases/$(database)/documents/users/$(userId)/cycle_profiles/$(request.resource.data.profile_id))
+          && !existsAfter(/databases/$(database)/documents/users/$(userId)/cycle_profile_tombstones/$(request.resource.data.profile_id));
+      }
+
+      // A note-task relation is valid only inside one owner's tree, with both
+      // endpoints present in that same tree. Deterministic IDs make updates
+      // unnecessary; deleting either endpoint triggers a scoped relation sweep.
+      match /note_task_links/{linkId} {
+        allow read, delete: if isOwner(userId);
+        allow create: if isOwner(userId)
+          && request.resource.data.id == linkId
+          && request.resource.data.user_id == userId
+          && request.resource.data.userId == userId
+          && request.resource.data.note_id is string
+          && request.resource.data.task_id is string
+          && existsAfter(/databases/$(database)/documents/users/$(userId)/notes/$(request.resource.data.note_id))
+          && existsAfter(/databases/$(database)/documents/users/$(userId)/tasks/$(request.resource.data.task_id))
+          && request.resource.data.keys().hasOnly([
+            'id', 'user_id', 'userId', 'note_id', 'task_id', 'created_at', 'updatedAt', '_firestoreSyncAt'
+          ]);
+        allow update: if false;
+      }
+
+      // These collections use transaction-backed folder fences. Keep them out
+      // of the broad owner rule so stale clients cannot write through a delete.
+      match /tasks/{taskId} {
+        allow read, delete: if isOwner(userId);
+        allow create: if isOwner(userId)
+          && hasNoDeleteMarker(request.resource.data)
+          && folderIsOpen(userId, request.resource.data.get('folder_id', null))
+          && taskIsOpen(userId, request.resource.data.get('parent_id', null));
+        allow update: if isOwner(userId) && (acquireDeleteLock() || releaseDeleteLock() || (
+          resource.data.get('_deleting', false) != true
+          && deleteMarkersUnchanged()
+          && folderReferenceUpdateAllowed(userId, 'folder_id')
+          && taskIsOpen(userId, resource.data.get('parent_id', null))
+          && taskIsOpen(userId, request.resource.data.get('parent_id', null))
+        ));
+      }
+
+      match /notes/{noteId} {
+        allow read, delete: if isOwner(userId);
+        allow create: if isOwner(userId)
+          && hasNoDeleteMarker(request.resource.data)
+          && folderIsOpen(userId, request.resource.data.get('folder_id', null));
+        allow update: if isOwner(userId) && (acquireDeleteLock() || releaseDeleteLock() || (
+          resource.data.get('_deleting', false) != true
+          && deleteMarkersUnchanged()
+          && folderReferenceUpdateAllowed(userId, 'folder_id')
+        ));
+      }
+
+      match /folders/{folderId} {
+        allow read: if isOwner(userId);
+        allow create: if isOwner(userId)
+          && hasNoDeleteMarker(request.resource.data)
+          && folderIsOpen(userId, request.resource.data.get('parent_id', null));
+        allow update: if isOwner(userId) && (acquireDeleteLock() || releaseDeleteLock() || (
+          resource.data.get('_deleting', false) != true
+          && deleteMarkersUnchanged()
+          && folderReferenceUpdateAllowed(userId, 'parent_id')
+        ));
+        allow delete: if isOwner(userId)
+          && resource.data.get('_deleting', false) == true
+          && resource.data.get('_delete_lock', null) is string;
+      }
+
+      match /folder_columns/{columnId} {
+        allow read, delete: if isOwner(userId);
+        allow create: if isOwner(userId)
+          && hasNoDeleteMarker(request.resource.data)
+          && folderIsOpen(userId, request.resource.data.get('folder_id', null));
+        allow update: if isOwner(userId)
+          && resource.data.get('_deleting', false) != true
+          && deleteMarkersUnchanged()
+          && folderIsOpen(userId, resource.data.get('folder_id', null))
+          && folderIsOpen(userId, request.resource.data.get('folder_id', null));
+      }
+
+      // Matching allow expressions are ORed: a more specific false does not
+      // override this grant. Keep server-managed collections out of it,
+      // including every nested document beneath those collections.
+      // 'module_access' belongs here too: entitlements are granted only by the
+      // signed module service (api/arsh/modules.ts, which uses the Admin SDK and
+      // bypasses these rules). When the owner could write it, any client could
+      // self-unlock paid modules and reset the redemption throttle.
+      match /{subcollection}/{docId=**} {
+        allow read, write: if isOwner(userId)
+          && !(subcollection in [
+            'user_roles',
+            'assistant_grants',
+            'assistant_audit',
+            'assistant_idempotency',
+            'assistant_trash',
+            'pharmacy_practice',
+            'leitner_reviews',
+            'cycle_profiles',
+            'cycle_logs',
+            'cycle_profile_tombstones',
+            'note_task_links',
+            'tasks',
+            'notes',
+            'folders',
+            'folder_columns',
+            'module_access'
+          ]);
+      }
+    }
+
+    // No wildcard top-level collection access. New collections must declare
+    // their ownership rules explicitly instead of inheriting a broad policy.
+  }
+}

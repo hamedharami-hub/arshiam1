@@ -1,0 +1,696 @@
+import React, { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useAuth } from "@/hooks/useAuth";
+import { requestDeadline } from "@/lib/requestDeadline";
+import { auth } from "@/lib/firebase";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Checkbox } from "@/components/ui/checkbox";
+import { Badge } from "@/components/ui/badge";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import { toast } from "sonner";
+import {
+  Bot,
+  Key,
+  Copy,
+  Check,
+  ShieldAlert,
+  Calendar,
+  FolderTree,
+  BookOpen,
+  CheckSquare,
+  Clock,
+  Trash2,
+  Terminal,
+  ExternalLink,
+  Sparkles,
+} from "lucide-react";
+import { useTranslation } from "react-i18next";
+import { agentInstructions, agentServerOrigin, readAgentResponse } from "@/lib/agentConnection";
+import agentSchema from "../../../public/agent-openapi.json";
+
+export type Scope =
+  | "tasks:read"
+  | "tasks:write"
+  | "folders:read"
+  | "folders:write"
+  | "memories:read"
+  | "memories:write"
+  | "calendar:read"
+  | "calendar:write";
+
+export interface Grant {
+  id: string;
+  name: string;
+  scopes: Scope[];
+  createdAt: string;
+  expiresAt: string;
+  lastUsedAt?: string | null;
+  revokedAt: string | null;
+}
+
+const SCOPE_GROUPS = [
+  {
+    id: "tasks",
+    titleFa: "مدیریت وظایف (Tasks)",
+    titleEn: "Task Management",
+    icon: CheckSquare,
+    scopes: [
+      { id: "tasks:read" as Scope, labelFa: "خواندن وظایف و جزئیات", labelEn: "Read tasks & details" },
+      { id: "tasks:write" as Scope, labelFa: "خواندن، ساخت، ویرایش، تکمیل و مجوز حذف وظایف", labelEn: "Read, create, edit, complete & grant task deletion permission" },
+    ],
+  },
+  {
+    id: "folders",
+    titleFa: "فولدرها و فهرست‌ها (Folders)",
+    titleEn: "Folders & Lists",
+    icon: FolderTree,
+    scopes: [
+      { id: "folders:read" as Scope, labelFa: "خواندن فولدرها و ساختار", labelEn: "Read folders & hierarchy" },
+      { id: "folders:write" as Scope, labelFa: "ساخت و ویرایش فولدرها", labelEn: "Create & edit folders" },
+    ],
+  },
+  {
+    id: "memories",
+    titleFa: "خاطرات و یادداشت‌ها (Memories & Notes)",
+    titleEn: "Memories & Notes",
+    icon: BookOpen,
+    scopes: [
+      { id: "memories:read" as Scope, labelFa: "خواندن خاطرات و یادداشت‌ها", labelEn: "Read notes & memories" },
+      { id: "memories:write" as Scope, labelFa: "ثبت و ویرایش خاطره یا یادداشت", labelEn: "Create & edit notes/memories" },
+    ],
+  },
+  {
+    id: "calendar",
+    titleFa: "تقویم و زمان‌بندی (Calendar & Schedule)",
+    titleEn: "Calendar & Schedule",
+    icon: Calendar,
+    scopes: [
+      { id: "calendar:read" as Scope, labelFa: "خواندن برنامه روزانه، هفتگی و ماهانه", labelEn: "Read daily/weekly/monthly schedule" },
+      { id: "calendar:write" as Scope, labelFa: "ثبت رویداد و بررسی تداخل زمانی", labelEn: "Schedule events & check conflicts" },
+    ],
+  },
+];
+
+const ALL_SCOPES: Scope[] = [
+  "tasks:read",
+  "tasks:write",
+  "folders:read",
+  "folders:write",
+  "memories:read",
+  "memories:write",
+  "calendar:read",
+  "calendar:write",
+];
+
+const READONLY_SCOPES: Scope[] = [
+  "tasks:read",
+  "folders:read",
+  "memories:read",
+  "calendar:read",
+];
+
+/** The narrowest useful preset: an agent can only read tasks. Least privilege by default. */
+const TASK_READ_PRESET: Scope[] = ["tasks:read"];
+
+/** Human-readable label for a scope, used in the plain-language review step. */
+function scopeLabel(scope: Scope, isEn: boolean): string {
+  for (const group of SCOPE_GROUPS) {
+    const match = group.scopes.find((s) => s.id === scope);
+    if (match) return isEn ? match.labelEn : match.labelFa;
+  }
+  return scope;
+}
+
+async function request(path: string, isEn: boolean, init: RequestInit = {}) {
+  const user = auth.currentUser;
+  if (!user) throw new Error("لطفاً برای مدیریت عامل‌ها وارد حساب خود شوید.");
+  const response = await fetch(`${agentServerOrigin(window.location.origin)}${path}`, {
+    ...init,
+    headers: {
+      Authorization: `Bearer ${await user.getIdToken()}`,
+      "Content-Type": "application/json",
+      ...init.headers,
+    },
+    cache: "no-store",
+  });
+  return readAgentResponse(response, isEn);
+}
+
+export function AssistantAccessSettings() {
+  const { user } = useAuth();
+  return <AssistantAccessSettingsContent key={user?.id ?? "signed-out"} />;
+}
+
+function AssistantAccessSettingsContent() {
+  const active = useRef(true);
+  const requestGeneration = useRef(0);
+  useLayoutEffect(() => { active.current = true; return () => { active.current = false; requestGeneration.current++; }; }, []);
+  const { i18n } = useTranslation();
+  const isEn = Boolean(i18n.language?.startsWith("en"));
+  const T = (fa: string, en: string) => (isEn ? en : fa);
+
+  const [grants, setGrants] = useState<Grant[]>([]);
+  const [name, setName] = useState("");
+  const [days, setDays] = useState(7);
+  const [scopes, setScopes] = useState<Scope[]>(TASK_READ_PRESET);
+  const [newToken, setNewToken] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [reviewOpen, setReviewOpen] = useState(false);
+  const [copiedToken, setCopiedToken] = useState(false);
+  const [copiedUrl, setCopiedUrl] = useState(false);
+  const [loadError, setLoadError] = useState("");
+  const [loading, setLoading] = useState(true);
+  const [testing, setTesting] = useState(false);
+  const [connectionResult, setConnectionResult] = useState("");
+
+  const testConnection = async () => {
+    if (!newToken || testing) return;
+    setTesting(true);
+    setConnectionResult("");
+    const deadline = requestDeadline(15000);
+    try {
+      const response = await fetch(`${baseApiUrl}/me`, {
+        headers: { Authorization: `Bearer ${newToken}` }, cache: "no-store",
+        signal: deadline.signal,
+      });
+      const result = await readAgentResponse(response, isEn);
+      if (!active.current) return;
+      if (!Array.isArray(result.data?.scopes)) throw new Error(T("پاسخ اتصال معتبر نیست", "Invalid connection response"));
+      setConnectionResult(T("اتصال توکن تأیید شد؛ این آزمایش فقط مجوز را خواند و داده‌ای تغییر نداد.", "Token connection verified. This test only read permissions; no account data was changed."));
+    } catch (error) {
+      if (active.current) setConnectionResult(error instanceof Error ? error.message : T("آزمایش اتصال ناموفق بود", "Connection test failed"));
+    } finally { deadline.dispose(); if (active.current) setTesting(false); }
+  };
+
+  const baseApiUrl =
+    typeof window !== "undefined"
+      ? `${agentServerOrigin(window.location.origin)}/api/v1/agent`
+      : "https://arshiam.vercel.app/api/v1/agent";
+  const serverOrigin = baseApiUrl.replace(/\/api\/v1\/agent$/, "");
+
+  const refresh = async () => {
+    if (!active.current) return;
+    const ticket = ++requestGeneration.current;
+    setLoading(true);
+    try {
+      const result = await request("/api/assistant-access", isEn);
+      if (!active.current || ticket !== requestGeneration.current) return;
+      setGrants(result.data || []);
+      setLoadError("");
+    } catch (err: any) {
+      if (!active.current || ticket !== requestGeneration.current) return;
+      setLoadError(err.message || T("خطا در اتصال به سرور عامل", "Could not connect to the agent server"));
+      toast.error(err.message || "خطا در بارگیری توکن‌ها");
+    } finally {
+      if (active.current && ticket === requestGeneration.current) setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    void refresh();
+  }, []);
+
+  const toggleScope = (scope: Scope, checked: boolean) => {
+    setScopes((prev) => (checked ? [...prev, scope] : prev.filter((s) => s !== scope)));
+  };
+
+  const openReview = () => {
+    if (!name.trim()) {
+      toast.error(T("لطفاً یک نام برای توکن عامل وارد کنید", "Please enter a token name"));
+      return;
+    }
+    if (scopes.length === 0) {
+      toast.error(T("حداقل یک مجوز باید انتخاب شود", "Select at least one scope"));
+      return;
+    }
+    setReviewOpen(true);
+  };
+
+  const createToken = async () => {
+    setReviewOpen(false);
+
+    setBusy(true);
+    setNewToken("");
+    try {
+      const result = await request("/api/assistant-access", isEn, {
+        method: "POST",
+        body: JSON.stringify({ name: name.trim(), scopes, expiresInDays: days }),
+      });
+      if (!active.current) return;
+      if (typeof result.token !== "string" || !result.token.trim()) throw new Error(T("پاسخ ساخت توکن معتبر نیست", "Invalid token creation response"));
+      setNewToken(result.token);
+      setName("");
+      toast.success(T("توکن عامل هوش مصنوعی با موفقیت ساخته شد", "AI agent token created successfully"));
+      await refresh();
+    } catch (err: any) {
+      if (active.current) toast.error(err.message || T("خطا در ایجاد توکن", "Failed to create token"));
+    } finally {
+      if (active.current) setBusy(false);
+    }
+  };
+
+  const revokeToken = async (id: string) => {
+    setBusy(true);
+    try {
+      await request(`/api/assistant-access/${id}`, isEn, { method: "DELETE" });
+      if (!active.current) return;
+      toast.success(T("توکن با موفقیت لغو و غیرفعال شد", "Token successfully revoked"));
+      await refresh();
+    } catch (err: any) {
+      if (active.current) toast.error(err.message || T("خطا در لغو توکن", "Failed to revoke token"));
+    } finally {
+      if (active.current) setBusy(false);
+    }
+  };
+
+  const copyToClipboard = async (text: string, isToken: boolean) => {
+    try {
+      await navigator.clipboard.writeText(text);
+    } catch {
+      toast.error(T("کپی انجام نشد؛ متن را دستی انتخاب و کپی کنید.", "Copy failed; select and copy the text manually."));
+      return;
+    }
+    if (isToken) {
+      setCopiedToken(true);
+      setTimeout(() => setCopiedToken(false), 2000);
+      toast.success(T("توکن کپی شد", "Token copied to clipboard"));
+    } else {
+      setCopiedUrl(true);
+      setTimeout(() => setCopiedUrl(false), 2000);
+      toast.success(T("آدرس API کپی شد", "API URL copied"));
+    }
+  };
+
+  const downloadSchema = () => {
+    const schema = { ...agentSchema, servers: [{ url: serverOrigin }] };
+    const url = URL.createObjectURL(new Blob([JSON.stringify(schema, null, 2)], { type: "application/json" }));
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = "arshnaz-agent-openapi.json";
+    link.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  };
+
+  return (
+    <section className="space-y-6 rounded-2xl border border-border/70 bg-card/60 p-4 sm:p-6 shadow-xs animate-in fade-in duration-200">
+      {/* Header */}
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-border/50 pb-4">
+        <div className="flex items-center gap-3">
+          <div className="w-10 h-10 rounded-2xl bg-primary/10 text-primary flex items-center justify-center shrink-0">
+            <Bot className="w-5 h-5" />
+          </div>
+          <div>
+            <h2 className="text-base sm:text-lg font-bold text-foreground">
+              {T("اتصال عامل‌های هوش مصنوعی (AI Agents)", "AI Agent Connections")}
+            </h2>
+            <p className="text-xs text-muted-foreground mt-0.5">
+              {T(
+                "ایجاد توکن شخصی اختصاصی برای اتصال عامل‌های هوشمند به وظایف، تقویم و خاطرات حساب شما",
+                "Create personal tokens for AI agents to securely interact with your tasks, calendar, and memories"
+              )}
+            </p>
+          </div>
+        </div>
+      </div>
+
+      {/* Base API URL Info Card */}
+      <div className="rounded-xl border border-border/60 bg-muted/30 p-3.5 space-y-2">
+        <div className="flex items-center justify-between gap-2">
+          <span className="text-xs font-semibold text-foreground flex items-center gap-1.5">
+            <Terminal className="w-3.5 h-3.5 text-primary" />
+            {T("آدرس پایه API اختصاصی عامل", "Base Agent API URL")}
+          </span>
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            onClick={() => copyToClipboard(baseApiUrl, false)}
+            className="h-7 text-xs px-2.5 gap-1 text-primary hover:bg-primary/10 rounded-lg"
+          >
+            {copiedUrl ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
+            <span>{copiedUrl ? T("کپی شد", "Copied") : T("کپی آدرس", "Copy URL")}</span>
+          </Button>
+        </div>
+        <div className="flex items-center gap-2 p-2 rounded-lg bg-background/80 border border-border/40 font-mono text-xs text-foreground select-all" dir="ltr">
+          <span className="truncate">{baseApiUrl}</span>
+        </div>
+        <p className="text-[11px] text-muted-foreground">
+          {T(
+            "عامل شما باید درخواست‌ها را با هدر Authorization: Bearer <TOKEN> ارسال کند.",
+            "Your agent must provide Authorization: Bearer <TOKEN> header on all requests."
+          )}
+        </p>
+      </div>
+
+      <div className="rounded-xl border border-border/60 bg-muted/20 p-4 space-y-3">
+        <h3 className="text-sm font-bold">{T("اتصال MCP به ChatGPT", "MCP connection to ChatGPT")}</h3>
+        <p className="text-xs text-muted-foreground">{T("در بخش اتصال سفارشی MCP در ChatGPT، آدرس زیر را وارد و احراز هویت OAuth را انتخاب کنید. ورود و اجازه در خود ارشیام انجام می‌شود؛ توکن را در چت وارد نکنید. امکان افزودن اتصال به حساب و سیاست workspace بستگی دارد.", "Add this URL as a custom MCP connection in ChatGPT and select OAuth authentication. Sign-in and consent happen in Arshiam; do not paste a token in chat. Availability depends on your account and workspace policy.")}</p>
+        <code dir="ltr" className="block break-all text-xs">{serverOrigin}/api/mcp</code>
+        <Button type="button" variant="outline" size="sm" onClick={() => navigator.clipboard.writeText(`${serverOrigin}/api/mcp`).then(() => toast.success(T("آدرس MCP کپی شد", "MCP URL copied"))).catch(() => toast.error(T("کپی نشد", "Copy failed")))}>{T("کپی آدرس MCP", "Copy MCP URL")}</Button>
+        <p className="text-xs text-muted-foreground">{T("مجوز اولیه فقط خواندن تسک‌هاست. مجوزهای یادداشت و نوشتن باید در اتصال OAuth درخواست شوند. این مسیر از REST/OpenAPI پایین جداست.", "Initial access is task reading only. Notes and write permissions must be requested through OAuth. This connection is separate from REST/OpenAPI below.")}</p>
+      </div>
+
+      <div className="rounded-xl border border-border/60 bg-muted/20 p-4 space-y-3">
+        <h3 className="text-sm font-bold">{T("اتصال به ChatGPT، Codex و Gemini", "Connect ChatGPT, Codex and Gemini")}</h3>
+        <p className="text-xs text-muted-foreground">{T("این اتصال تغییرات حساب شما را انجام می‌دهد، نه تغییر کد برنامه. عامل باید ابزار ارسال درخواست HTTP داشته باشد؛ دادن توکن به یک چت معمولی کافی نیست.", "This connection changes your account data, not application code. The agent needs an HTTP tool; pasting a token into an ordinary chat is not enough.")}</p>
+        <ol className="list-decimal ps-5 space-y-2 text-xs leading-relaxed">
+          <li><strong>ChatGPT:</strong> {T("در یک GPT سفارشی خصوصی، بخش Actions را باز کنید، فایل OpenAPI را وارد کنید و Authentication را روی API Key با نوع Bearer بگذارید. توکن را فقط در فیلد احراز هویت وارد کنید. دسترسی به Actions به حساب و محیط شما بستگی دارد.", "In a private custom GPT, open Actions, import the OpenAPI file, and set Authentication to API Key with Bearer authentication. Enter the token only in the authentication field. Actions availability depends on your account and workspace.")}</li>
+          <li><strong>Codex:</strong> {T("توکن را به‌صورت متغیر امن ARSHNAZ_AGENT_TOKEN در محیط عامل تنظیم کنید، دسترسی HTTPS به دامنهٔ سرور بدهید و راهنمای اتصال را به تسک بدهید. عامل می‌تواند از ابزار HTTP یا curl استفاده کند.", "Configure ARSHNAZ_AGENT_TOKEN securely in the agent environment, allow HTTPS access to the server domain, and provide the connection instructions to the task. The agent can use an HTTP tool or curl.")}</li>
+          <li><strong>Gemini:</strong> {T("برای Gemini CLI یا یک عامل مبتنی بر Gemini، ابزار HTTP یا function calling برای این API تنظیم کنید. توکن باید در تنظیمات امن ابزار باشد. چت معمولی Gemini لزوماً امکان اجرای این درخواست‌ها را ندارد.", "For Gemini CLI or a Gemini-based agent, configure an HTTP tool or function calling for this API. Keep the token in secure tool configuration. Ordinary Gemini chat may not be able to execute these requests.")}</li>
+        </ol>
+        <div className="flex flex-wrap gap-2">
+          <Button type="button" variant="outline" size="sm" onClick={downloadSchema}>{T("دریافت فایل OpenAPI", "Download OpenAPI")}</Button>
+          <Button type="button" variant="outline" size="sm" onClick={async () => {
+            try {
+              await navigator.clipboard.writeText(agentInstructions(serverOrigin));
+              toast.success(T("راهنمای اتصال کپی شد؛ توکن در آن نیست.", "Connection instructions copied; no token is included."));
+            } catch { toast.error(T("کپی راهنما انجام نشد", "Could not copy instructions")); }
+          }}>{T("کپی راهنمای عامل", "Copy agent instructions")}</Button>
+        </div>
+        <p className="text-xs text-muted-foreground">{T("پس از اتصال، از عامل بخواهید ابتدا اطلاعات اتصال را از مسیر /me بخواند و سپس تغییر موردنظر شما را انجام دهد. برای هر عامل یک توکن جدا بسازید.", "After connecting, ask the agent to read /me first, then perform your requested change. Create a separate token for each agent.")}</p>
+      </div>
+
+      {loadError && <div role="alert" className="rounded-xl border border-destructive/40 p-3 text-xs text-destructive space-y-2">
+        <p>{loadError}</p>
+        <Button type="button" variant="outline" size="sm" onClick={() => void refresh()}>{T("تلاش دوباره", "Retry connection")}</Button>
+      </div>}
+
+      {/* Token Creation Card */}
+      <div className="rounded-xl border border-border/60 bg-card p-4 space-y-4">
+        <div className="flex items-center justify-between">
+          <h3 className="text-xs sm:text-sm font-bold text-foreground flex items-center gap-2">
+            <Key className="w-4 h-4 text-amber-500" />
+            {T("ساخت توکن دسترسی جدید", "Create New Access Token")}
+          </h3>
+
+          {/* Quick Presets */}
+          <div className="flex items-center gap-1.5">
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={() => setScopes(ALL_SCOPES)}
+              className="h-6 text-[11px] px-2 rounded-md"
+            >
+              {T("دسترسی کامل", "Full Access")}
+            </Button>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={() => setScopes(READONLY_SCOPES)}
+              className="h-6 text-[11px] px-2 rounded-md"
+            >
+              {T("فقط‌خواندنی", "Read-Only")}
+            </Button>
+          </div>
+        </div>
+
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+          <div>
+            <label className="text-xs font-medium text-muted-foreground block mb-1">
+              {T("نام توکن / عامل *", "Token / Agent Name *")}
+            </label>
+            <Input
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              placeholder={T("مثلاً: Claude Code یا Gemini Assistant", "e.g. My Personal AI Agent")}
+              className="h-9 text-xs"
+              maxLength={80}
+            />
+          </div>
+
+          <div>
+            <label className="text-xs font-medium text-muted-foreground block mb-1">
+              {T("مدت اعتبار (روز)", "Expires In (Days)")}
+            </label>
+            <div className="flex items-center gap-1.5">
+              {[1, 7, 30, 90, 180, 365].map((d) => (
+                <button
+                  key={d}
+                  type="button"
+                  onClick={() => setDays(d)}
+                  className={`flex-1 h-9 rounded-lg border text-xs font-medium transition ${
+                    days === d
+                      ? "border-primary bg-primary/10 text-primary font-bold"
+                      : "border-border/60 bg-muted/20 text-muted-foreground hover:bg-muted"
+                  }`}
+                >
+                  {d} {T("روز", "d")}
+                </button>
+              ))}
+            </div>
+          </div>
+        </div>
+
+        {/* Scopes Selection */}
+        <div className="space-y-3 pt-1 border-t border-border/40">
+          <label className="text-xs font-semibold text-foreground block">
+            {T("مجوزهای دسترسی (Scopes)", "Access Permissions (Scopes)")}
+          </label>
+          <p className="text-[11px] leading-5 text-muted-foreground">
+            {T(
+              "به‌صورت پیش‌فرض فقط «خواندن وظایف» فعال است. کمترین دسترسی لازم را بده و برای هر عامل یک توکن جدا بساز.",
+              "Only task reading is enabled by default. Grant the least access needed, and create a separate token per agent."
+            )}
+          </p>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+            {SCOPE_GROUPS.map((group) => {
+              const Icon = group.icon;
+              return (
+                <div key={group.id} className="p-3 rounded-xl bg-muted/25 border border-border/50 space-y-2">
+                  <div className="flex items-center gap-2 text-xs font-bold text-foreground">
+                    <Icon className="w-3.5 h-3.5 text-primary" />
+                    <span>{isEn ? group.titleEn : group.titleFa}</span>
+                  </div>
+                  <div className="space-y-1.5">
+                    {group.scopes.map((s) => (
+                      <label
+                        key={s.id}
+                        className="flex items-start gap-2 text-xs text-muted-foreground hover:text-foreground cursor-pointer select-none"
+                      >
+                        <Checkbox
+                          checked={scopes.includes(s.id)}
+                          onCheckedChange={(checked) => toggleScope(s.id, checked === true)}
+                          className="mt-0.5"
+                        />
+                        <span className="leading-tight">{isEn ? s.labelEn : s.labelFa}</span>
+                      </label>
+                    ))}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+
+        <div className="space-y-1.5">
+          <Button
+            type="button"
+            disabled={busy || !name.trim() || scopes.length === 0}
+            onClick={openReview}
+            className="w-full sm:w-auto h-9 text-xs px-5 gap-1.5 rounded-xl"
+          >
+            <Sparkles className="w-3.5 h-3.5" />
+            <span>{T("بازبینی و ساخت توکن", "Review & create token")}</span>
+          </Button>
+          <p className="text-[11px] text-muted-foreground">
+            {T("پیش از ساخت، خلاصه‌ای از دسترسی‌ها را به زبان ساده می‌بینی.", "You'll see a plain-language summary of the access before it is created.")}
+          </p>
+        </div>
+      </div>
+
+      {/* Plain-language review before creating a token */}
+      <Dialog open={reviewOpen} onOpenChange={setReviewOpen}>
+        <DialogContent dir={isEn ? "ltr" : "rtl"} className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>{T("بازبینی دسترسی توکن", "Review token access")}</DialogTitle>
+            <DialogDescription className="leading-6">
+              {T(
+                "با تأیید، یک عامل هوش مصنوعی می‌تواند با این توکن موارد زیر را انجام دهد. هر زمان می‌توانی توکن را لغو کنی.",
+                "If you confirm, an AI agent with this token can do the following. You can revoke the token at any time."
+              )}
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-2 rounded-lg bg-muted/50 p-3 text-sm">
+            <p className="font-medium" dir="auto">{name.trim()}</p>
+            <ul className="list-disc space-y-1 ps-5 text-xs text-muted-foreground">
+              {scopes.map((scope) => (
+                <li key={scope} dir="auto">{scopeLabel(scope, isEn)}</li>
+              ))}
+            </ul>
+            <p className="text-xs text-muted-foreground">
+              {T(
+                `مدت اعتبار: ${days} روز (تا ${new Date(Date.now() + days * 86_400_000).toLocaleDateString()})`,
+                `Valid for ${days} day(s) (until ${new Date(Date.now() + days * 86_400_000).toLocaleDateString()})`
+              )}
+            </p>
+          </div>
+          <DialogFooter className="gap-2">
+            <Button type="button" variant="outline" onClick={() => setReviewOpen(false)}>
+              {T("انصراف", "Cancel")}
+            </Button>
+            <Button type="button" disabled={busy} onClick={() => void createToken()}>
+              <Sparkles className="w-3.5 h-3.5" />
+              {T("ساخت توکن", "Create token")}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Newly Created Token Display (Shown Once) */}
+      {newToken && (
+        <div className="rounded-xl border-2 border-emerald-500/40 bg-emerald-500/10 p-4 space-y-3 animate-in fade-in zoom-in-95">
+          <div className="flex items-start gap-2.5">
+            <ShieldAlert className="w-5 h-5 text-emerald-600 dark:text-emerald-400 shrink-0 mt-0.5" />
+            <div className="flex-1">
+              <h4 className="text-xs sm:text-sm font-bold text-emerald-800 dark:text-emerald-300">
+                {T(
+                  "توکن جدید با موفقیت ایجاد شد — این کلید را همین حالا ذخیره کنید!",
+                  "Token created successfully — Save this secret key now!"
+                )}
+              </h4>
+              <p className="text-xs text-emerald-700 dark:text-emerald-400 mt-0.5">
+                {T(
+                  "برای امنیت حساب، این کلید تنها یک‌بار به شما نمایش داده می‌شود و هرگز دوباره قابل مشاهده نخواهد بود.",
+                  "For your security, this raw token will only be shown once and cannot be retrieved later."
+                )}
+              </p>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-2">
+            <Input
+              value={newToken}
+              aria-label={T("توکن تازهٔ ایجنت", "New agent token")}
+              readOnly
+              dir="ltr"
+              className="font-mono text-xs bg-background border-emerald-500/30 text-emerald-700 dark:text-emerald-300 h-9"
+            />
+            <Button
+              type="button"
+              onClick={() => copyToClipboard(newToken, true)}
+              className="h-9 px-3 gap-1.5 shrink-0 bg-emerald-600 hover:bg-emerald-700 text-white"
+            >
+              {copiedToken ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
+              <span className="text-xs">{copiedToken ? T("کپی شد", "Copied") : T("کپی کلید", "Copy Token")}</span>
+            </Button>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            <Button type="button" variant="outline" disabled={testing} onClick={() => void testConnection()}>{testing ? T("در حال آزمایش…", "Testing…") : T("آزمایش اتصال توکن", "Test token connection")}</Button>
+            <Button type="button" variant="ghost" onClick={() => { setNewToken(""); setConnectionResult(""); }}>{T("پنهان‌کردن کلید", "Hide secret")}</Button>
+          </div>
+          {connectionResult && <p role="status" className="text-xs leading-6">{connectionResult}</p>}
+        </div>
+      )}
+
+      {/* Existing Tokens List */}
+      <div className="space-y-3 pt-2">
+        <div className="flex items-center justify-between">
+          <h3 className="text-xs sm:text-sm font-bold text-foreground flex items-center gap-2">
+            <Key className="w-4 h-4 text-muted-foreground" />
+            <span>{T("توکن‌های عامل‌های ثبت‌شده", "Registered Agent Tokens")}</span>
+            <span className="text-xs text-muted-foreground">({grants.length})</span>
+          </h3>
+        </div>
+
+        {loading ? <p role="status" className="text-xs text-muted-foreground">{T("در حال دریافت توکن‌ها…", "Loading tokens…")}</p> : grants.length === 0 && !loadError ? (
+          <div className="rounded-xl border border-dashed border-border/80 p-8 text-center bg-muted/10">
+            <Bot className="w-8 h-8 text-muted-foreground/40 mx-auto mb-2" />
+            <p className="text-xs text-muted-foreground">
+              {T(
+                "هنوز هیچ توکنی برای عامل‌های هوش مصنوعی ایجاد نکرده‌اید.",
+                "No agent access tokens have been created yet."
+              )}
+            </p>
+          </div>
+        ) : (
+          <div className="space-y-2.5">
+            {grants.map((grant) => {
+              const isRevoked = Boolean(grant.revokedAt);
+              const isExpired = Date.parse(grant.expiresAt) <= Date.now();
+              const isActive = !isRevoked && !isExpired;
+
+              return (
+                <div
+                  key={grant.id}
+                  className={`p-3.5 rounded-xl border transition flex flex-col sm:flex-row sm:items-center justify-between gap-3 ${
+                    isActive
+                      ? "bg-card border-border/70 hover:border-primary/40 shadow-xs"
+                      : "bg-muted/20 border-border/40 opacity-75"
+                  }`}
+                >
+                  <div className="space-y-1.5 min-w-0">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <span className="text-xs font-bold text-foreground truncate">{grant.name}</span>
+                      {isActive && (
+                        <Badge variant="outline" className="text-[10px] bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border-emerald-500/30">
+                          {T("فعال", "Active")}
+                        </Badge>
+                      )}
+                      {isRevoked && (
+                        <Badge variant="outline" className="text-[10px] bg-destructive/10 text-destructive border-destructive/30">
+                          {T("لغوشده", "Revoked")}
+                        </Badge>
+                      )}
+                      {!isRevoked && isExpired && (
+                        <Badge variant="outline" className="text-[10px] bg-amber-500/10 text-amber-600 dark:text-amber-400 border-amber-500/30">
+                          {T("منقضی‌شده", "Expired")}
+                        </Badge>
+                      )}
+                    </div>
+
+                    <div className="flex flex-wrap gap-1">
+                      {grant.scopes.map((scope) => (
+                        <span key={scope} className="text-[10px] px-1.5 py-0.5 rounded-md bg-muted/60 text-muted-foreground font-mono">
+                          {scope}
+                        </span>
+                      ))}
+                    </div>
+
+                    <div className="flex items-center gap-3 text-[11px] text-muted-foreground">
+                      <span className="flex items-center gap-1">
+                        <Clock className="w-3 h-3" />
+                        <span>
+                          {T("انقضا:", "Expires:")} {new Date(grant.expiresAt).toLocaleDateString()}
+                        </span>
+                      </span>
+                      {grant.lastUsedAt && (
+                        <span>
+                          {T("آخرین استفاده:", "Last used:")} {new Date(grant.lastUsedAt).toLocaleDateString()}
+                        </span>
+                      )}
+                    </div>
+                  </div>
+
+                  <div className="flex items-center gap-2 shrink-0">
+                    {isActive && (
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        disabled={busy}
+                        onClick={() => void revokeToken(grant.id)}
+                        className="h-7 text-xs text-destructive hover:bg-destructive/10 border-destructive/30 rounded-lg"
+                      >
+                        <Trash2 className="w-3 h-3" />
+                        <span>{T("لغو دسترسی", "Revoke")}</span>
+                      </Button>
+                    )}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
+    </section>
+  );
+}
