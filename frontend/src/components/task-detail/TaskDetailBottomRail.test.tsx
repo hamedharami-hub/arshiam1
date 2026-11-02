@@ -51,9 +51,6 @@ describe("TaskDetailBottomRail Add Menu", () => {
     T: (fa: string, en: string) => `${fa} / ${en}`,
     onAddNote: vi.fn(),
     onAddLocation: vi.fn(),
-    onPickContact: vi.fn(),
-    onNewContact: vi.fn(),
-    onImportDeviceContact: vi.fn(),
     onLinkKnowledge: vi.fn(),
   };
 

@@ -8,7 +8,7 @@ import { MobileTabSlot } from "./MobileTabSlot";
 import { MobileBottomBar } from "./MobileBottomBar";
 
 vi.mock("react-i18next", () => ({ useTranslation: () => ({ t: (_key: string, fallback: string) => fallback, i18n: { language: "en" } }) }));
-vi.mock("@/lib/appModules", () => ({ withFeatureMetadata: (value: unknown) => value, isPathAllowed: (path: string) => !path.includes("mind") && !path.includes("knowledge"), useModules: () => ({ ready: true }) }));
+vi.mock("@/lib/appModules", () => ({ isPathAllowed: (path: string) => !path.includes("mind") && !path.includes("knowledge"), useModules: () => ({ ready: true }) }));
 vi.mock("sonner", () => ({ toast: { error: vi.fn() } }));
 vi.mock("@/components/ui/sidebar", () => ({ useSidebar: () => ({ openMobileFromSide: vi.fn() }) }));
 vi.mock("./BottomQuickAddButton", () => ({ BottomQuickAddButton: () => null }));

@@ -128,9 +128,6 @@ export interface TaskDetailBottomRailProps {
   T: (fa: string, en: string) => string;
   onAddNote?: () => void;
   onAddLocation?: () => void;
-  onPickContact?: () => void;
-  onNewContact?: () => void;
-  onImportDeviceContact?: () => void;
   onLinkKnowledge?: () => void;
 }
 
@@ -172,9 +169,6 @@ export function TaskDetailBottomRail({
   T,
   onAddNote,
   onAddLocation,
-  onPickContact,
-  onNewContact,
-  onImportDeviceContact,
   onLinkKnowledge,
 }: TaskDetailBottomRailProps) {
   const [moreOpen, setMoreOpen] = React.useState(false);

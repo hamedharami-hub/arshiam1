@@ -96,7 +96,7 @@ export function BottomTabBar() {
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [navigate, toggleSidebar, modules]);
 
-  // For compact phone layout: reactive user-chosen tabs from settings (default: today, calendar, notes).
+  // For compact phone layout: reactive user-chosen tabs from settings (default: today, planning, calendar, inbox).
   // The compact bar is the only rendered bar, so this list is the single source of tab config.
   const selectedTabKeys = useMobileBottomTabs();
   const mobileCustomTabs = useMemo<BottomTabItemConfig[]>(() => {

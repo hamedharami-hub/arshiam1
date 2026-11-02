@@ -374,7 +374,7 @@ export function AISettingsTab({
   }, []);
 
   const grouped = useMemo(() => {
-    const GROUP_ORDER = ["General", "Tasks", "Notes", "Folder", "Mental health"];
+    const GROUP_ORDER = ["General", "Tasks", "Notes", "Folder"];
     const m: Record<string, { groupEn: string; ops: OperationMeta[] }> = {};
     for (const op of OPERATIONS) {
       const g = isEn ? op.groupEn : op.group;
@@ -621,8 +621,8 @@ export function AISettingsTab({
                 </Label>
                 <p className="text-xs text-muted-foreground leading-relaxed">
                   {isEn
-                    ? "By default, your About Me profile, mind/mental-health summary, and goals are not attached to AI prompts. When opted in, only a minimal, relevant summary is included:"
-                    : "در حالت پیش‌فرض، پروفایل «درباره من»، خلاصهٔ ذهن/سلامت روان و اهداف شما به پرامپت‌های هوش مصنوعی پیوست نمی‌شود. در صورت فعال‌سازی، فقط خلاصهٔ حداقلی و مرتبط زیر همراه پرامپت ارسال می‌شود:"}
+                    ? "This edition sends no profile or questionnaire summary to AI prompts. The switch is kept only so older saved settings keep working."
+                    : "این نسخه هیچ خلاصه‌ای از پروفایل یا پرسشنامه را به پرامپت‌های هوش مصنوعی نمی‌فرستد. این گزینه فقط برای سازگاری با تنظیمات قدیمی نگه داشته شده است."}
                 </p>
               </div>
               <Switch
@@ -643,11 +643,6 @@ export function AISettingsTab({
               <div className="font-medium text-foreground text-[11px]">
                 {isEn ? "Categories of data included only when opted in:" : "دسته‌بندی داده‌های ارسالی فقط پس از فعال‌سازی:"}
               </div>
-              <ul className="list-disc pe-4 space-y-1 text-[11px] leading-relaxed">
-                <li>{isEn ? "Primary goals & focus life areas (from About Me)" : "اهداف اصلی و حوزه‌های تمرکز (از پرسشنامه درباره من)"}</li>
-                <li>{isEn ? "Communication & energy style preferences" : "ترجیحات ارتباطی و زمان اوج انرژی روزانه"}</li>
-                <li>{isEn ? "Mind profile summary (if previously recorded by you)" : "خلاصه پروفایل ذهن (در صورت ثبت قبلی توسط خودتان)"}</li>
-              </ul>
               <p className="pt-0.5 text-[11px] leading-relaxed border-t border-border/40">
                 {isEn
                   ? "Independent of this switch: when you use Chat, the conversation history in that thread is sent to the selected provider so it can follow the discussion; when you use Daily/Weekly Planning, a compact summary of the relevant tasks (titles, priority, schedule) is sent. Turning personalization off does not stop these feature-specific payloads."

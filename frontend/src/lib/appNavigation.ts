@@ -1,20 +1,26 @@
 // Only durable app destinations may be restored. Never replay creation,
 // sharing, assessment/session or action URLs on a later launch.
+// Routes that render a page in this edition. Retired paths redirect instead of
+// restoring, so they are deliberately absent here.
 const ROUTES = new Set([
-  "today", "tomorrow", "next7", "inbox", "smart", "notes", "diary", "garden",
-  "pomodoro", "calendar", "contacts", "knowledge", "knowledge-mindmap",
-  "interactive-study", "continue", "stats", "planning", "mind", "crisis", "self",
-  "checkin", "thoughts", "calm", "breathing", "sleep", "values", "life-architect",
-  "worry", "cycle", "about-me", "settings", "shared", "widgets", "tools",
+  "today", "tomorrow", "next7", "inbox", "smart", "notes", "pomodoro", "calendar",
+  "stats", "planning", "values", "settings", "shared", "widgets", "admin",
 ]);
 const SAFE_QUERY: Record<string, string[]> = {
-  notes: ["folder", "tag", "select"], knowledge: ["docId", "folderId"],
-  "knowledge-mindmap": ["docId", "folderId"], "interactive-study": ["docId", "folderId"],
-  settings: ["tab"], thoughts: ["mode", "record"], widgets: ["widget"],
+  notes: ["folder", "tag", "select"], settings: ["tab"], widgets: ["widget"],
 };
 
+/** Backslash, whitespace and control characters are never valid in a stored route. */
+function hasControlOrSpace(value: string): boolean {
+  for (let i = 0; i < value.length; i += 1) {
+    const code = value.charCodeAt(i);
+    if (code <= 0x20 || code === 0x5c) return true;
+  }
+  return false;
+}
+
 export function safeLastRoute(raw: string | null): string | null {
-  if (!raw || raw.length > 2048 || !raw.startsWith("/app/") || /[\\\u0000-\u0020]/.test(raw)) return null;
+  if (!raw || raw.length > 2048 || !raw.startsWith("/app/") || hasControlOrSpace(raw)) return null;
   try {
     const url = new URL(raw, "https://app.invalid");
     const route = url.pathname.slice(5);
@@ -57,21 +63,13 @@ export function navigationInteractionBlocked(target?: EventTarget | null): boole
 const TITLES: Record<string, [string, string]> = {
   today: ["امروز", "Today"], tomorrow: ["فردا", "Tomorrow"], inbox: ["صندوق ورودی", "Inbox"],
   next7: ["هفت روز آینده", "Next seven days"], notes: ["یادداشت‌ها", "Notes"],
-  knowledge: ["پایگاه دانش", "Knowledge"], settings: ["تنظیمات", "Settings"],
-  calendar: ["تقویم", "Calendar"], planning: ["برنامه‌ریزی", "Planning"],
+  settings: ["تنظیمات", "Settings"], calendar: ["تقویم", "Calendar"], planning: ["برنامه‌ریزی", "Planning"],
   smart: ["فهرست هوشمند", "Smart list"], folder: ["پوشه", "Folder"], tag: ["برچسب", "Tag"],
-  diary: ["دفتر روزانه", "Diary"], garden: ["باغ", "Garden"], pomodoro: ["تمرکز", "Focus timer"],
-  contacts: ["مخاطبان", "Contacts"], "knowledge-mindmap": ["نقشه دانش", "Knowledge map"],
-  "interactive-study": ["یادگیری تعاملی", "Interactive study"], continue: ["ادامه یادگیری", "Continue learning"],
-  stats: ["آمار", "Statistics"], mind: ["ذهن", "Mind"], crisis: ["کمک فوری", "Crisis support"],
-  self: ["خودشناسی", "Self knowledge"], checkin: ["ثبت حال", "Check-in"], thoughts: ["افکار", "Thought records"],
-  calm: ["آرامش", "Calm"], breathing: ["تنفس", "Breathing"], sleep: ["خواب", "Sleep"],
-  values: ["ارزش‌ها", "Values"], "life-architect": ["معمار زندگی", "Life architect"], worry: ["نگرانی", "Worry"],
-  cycle: ["چرخه", "Cycle"], "about-me": ["درباره من", "About me"], shared: ["اشتراک‌ها", "Shared with me"],
-  widgets: ["ابزارک‌ها", "Widgets"], widget: ["ابزارک", "Widget"], tools: ["ابزارها", "Tools"],
+  pomodoro: ["تمرکز", "Focus timer"], stats: ["آمار", "Statistics"], values: ["ارزش‌ها", "Values"],
+  shared: ["اشتراک‌ها", "Shared with me"], widgets: ["ابزارک‌ها", "Widgets"], widget: ["ابزارک", "Widget"],
   tasks: ["جزئیات کار", "Task details"], new: ["ایجاد مورد جدید", "Create new item"],
-  recall: ["مرور", "Recall"], screener: ["ارزیابی", "Assessment"], admin: ["مدیریت", "Administration"],
-  "share-target": ["دریافت اشتراک", "Receive shared content"], "rewrite-article": ["بازنویسی مقاله", "Rewrite article"],
+  admin: ["مدیریت", "Administration"],
+  "share-target": ["دریافت اشتراک", "Receive shared content"],
 };
 export function routeTitle(pathname: string, isEn: boolean): string {
   const key = pathname.split("/")[2];
