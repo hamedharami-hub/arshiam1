@@ -99,7 +99,9 @@ import {
   captureTaskUndoSnapshots,
   noteSnapshot,
   noteSnapshotMatches,
+  sameUndoValue,
   type TaskNoteSnapshot,
+  type TaskUndoSnapshot,
 } from "@/components/task-detail/taskDetailUndo";
 import { TaskLocationDialog } from "@/components/task-detail/TaskLocationDialog";
 import { TaskSourceCards } from "@/components/task-detail/TaskSourceCards";

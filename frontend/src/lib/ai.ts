@@ -127,7 +127,9 @@ function sanitizeAIResult(mode: AIMode, result: any): { text: string; data?: any
         if (key === "all-or-nothing" || key === "black_and_white") key = "all_or_nothing";
         if (key === "should_statement" || key === "must") key = "shoulds";
         return {
-          key: validKeys.has(key) ? (key as Distortion) : "overgeneralization",
+          // With no configured label set every key is unknown; keeping the model key is
+          // better than relabelling everything as one distortion.
+          key: validKeys.size === 0 || validKeys.has(key) ? (key as Distortion) : "overgeneralization",
           explanation: String(d.explanation || ""),
         };
       });

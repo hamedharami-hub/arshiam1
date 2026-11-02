@@ -132,10 +132,10 @@ function PlanChildRow({
           <CalendarDays className="h-3 w-3 shrink-0" />
           <bdi className="truncate">{scheduleLabel(readSchedule(task, settings), settings, fa ? "fa" : "en")}</bdi>
         </span>}
-        {a.onStartFocus && !done && task.status !== "wont_do" && (
+        {onStartFocus && !done && task.status !== "wont_do" && (
           <button
             type="button"
-            onClick={(e) => { e.stopPropagation(); a.onStartFocus?.(task); }}
+            onClick={(e) => { e.stopPropagation(); onStartFocus?.(task); }}
             className="grid h-8 w-8 shrink-0 place-items-center rounded-md text-muted-foreground opacity-80 transition-opacity hover:bg-primary/10 hover:text-primary group-hover:opacity-100"
             aria-label={fa ? "شروع تمرکز (پومودورو)" : "Start focus (Pomodoro)"}
             title={fa ? "شروع تمرکز (پومودورو)" : "Start focus (Pomodoro)"}

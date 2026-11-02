@@ -15,7 +15,7 @@ function cloneUndoValue(value: unknown): unknown {
   catch { return normalized; }
 }
 
-function sameUndoValue(left: unknown, right: unknown): boolean {
+export function sameUndoValue(left: unknown, right: unknown): boolean {
   try { return JSON.stringify(left ?? null) === JSON.stringify(right ?? null); }
   catch { return Object.is(left, right); }
 }

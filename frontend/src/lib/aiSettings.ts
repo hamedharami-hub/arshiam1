@@ -34,8 +34,19 @@ export type AIOperation =
   | "distortion_detect"
   | "about_me_analysis";
 
+/** Operations whose feature was retired in the planning edition. Kept in the union so
+ *  legacy saved settings still load, but no longer offered or recommended in Settings. */
+export type RetiredAIOperation =
+  | "interactive_learning"
+  | "article_rewrite"
+  | "assessment_analysis"
+  | "distortion_detect"
+  | "about_me_analysis";
+
+export type ActiveAIOperation = Exclude<AIOperation, RetiredAIOperation>;
+
 export type OperationMeta = {
-  key: AIOperation;
+  key: ActiveAIOperation;
   labelFa: string;
   labelEn: string;
   descFa: string;
@@ -70,9 +81,7 @@ export const OPERATIONS: OperationMeta[] = [
 // Recommended provider+model for each operation.
 // These are *smart defaults* — picked for quality/cost/latency per task type.
 // Users can override per-operation in Settings → AI.
-export const OP_RECOMMENDED: Record<AIOperation, { provider: Provider; model: string; whyFa: string; whyEn: string }> = {
-  article_rewrite:       { provider: "gemini", model: "gemini-3-flash-preview", whyFa: "بازنویسی متن", whyEn: "Article rewriting" },
-  assessment_analysis:   { provider: "gemini", model: "gemini-3-flash-preview", whyFa: "تحلیل متن ارزیابی", whyEn: "Assessment explanation" },
+export const OP_RECOMMENDED: Record<ActiveAIOperation, { provider: Provider; model: string; whyFa: string; whyEn: string }> = {
   parse_task:            { provider: "gemini", model: "gemini-3-flash-preview",       whyFa: "سریع و دقیق برای استخراج ساختار",            whyEn: "Fast & accurate at structured extraction" },
   parse_task_list:       { provider: "gemini", model: "gemini-3-flash-preview",       whyFa: "استخراج چند کار از متن یا گفتار",            whyEn: "Extract multiple tasks from text or speech" },
   breakdown:             { provider: "gemini", model: "gemini-3-flash-preview",                    whyFa: "استدلال مرحله‌ای بهتر",                       whyEn: "Better step-by-step reasoning" },
@@ -86,10 +95,7 @@ export const OP_RECOMMENDED: Record<AIOperation, { provider: Provider; model: st
   inline_edit:           { provider: "gemini", model: "gemini-3-flash-preview",                    whyFa: "ویرایش دقیق محدوده انتخاب‌شده",                whyEn: "Precise edits on selected text" },
   suggest:               { provider: "gemini", model: "gemini-3-flash-preview",       whyFa: "پیشنهاد متنوع و سریع",                         whyEn: "Diverse suggestions, fast" },
   chat:                  { provider: "gemini", model: "gemini-3-flash-preview",                    whyFa: "همه‌کاره و متعادل",                            whyEn: "Versatile & balanced" },
-  distortion_detect:     { provider: "gemini", model: "gemini-3.1-pro-preview",                        whyFa: "reasoning قوی برای تحلیل CBT",                 whyEn: "Strong reasoning for CBT analysis" },
-  about_me_analysis:     { provider: "gemini", model: "gemini-3-flash-preview",                    whyFa: "استخراج ساختاریافته اهداف بدون برچسب بالینی",   whyEn: "Structured goal extraction without clinical labeling" },
   note_actions:          { provider: "gemini", model: "gemini-3-flash-preview",                    whyFa: "قالب‌بندی و ترجمه آموزشی سریع",                 whyEn: "Fast educational formatting & translation" },
-  interactive_learning:  { provider: "gemini", model: "gemini-3-flash-preview",                    whyFa: "تولید ویجت‌های تعاملی یادگیری",                whyEn: "Interactive learning widget generation" },
 };
 
 export const PROVIDER_INFO: Record<Provider, { label: string; defaultModel: string; baseUrl: string; help: string; models: string[] }> = {
@@ -192,7 +198,8 @@ export function defaultConfig(): ProviderConfig {
 }
 
 export function recommendedConfig(op: AIOperation): ProviderConfig {
-  const r = OP_RECOMMENDED[op];
+  // Retired operations are no longer recommended but may still exist in saved settings.
+  const r = OP_RECOMMENDED[op as ActiveAIOperation] ?? OP_RECOMMENDED.chat;
   return { provider: r.provider, apiKey: "", model: r.model, baseUrl: "" };
 }
 

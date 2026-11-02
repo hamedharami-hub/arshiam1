@@ -499,8 +499,6 @@ export function SidebarQuickLinksSettings({ isEn }: { isEn: boolean }) {
                 { key: "core", labelFa: GROUP_LABELS.core.fa, labelEn: GROUP_LABELS.core.en },
                 { key: "do", labelFa: GROUP_LABELS.do.fa, labelEn: GROUP_LABELS.do.en },
                 { key: "grow", labelFa: GROUP_LABELS.grow.fa, labelEn: GROUP_LABELS.grow.en },
-                { key: "mind", labelFa: GROUP_LABELS.mind.fa, labelEn: GROUP_LABELS.mind.en },
-                { key: "me", labelFa: GROUP_LABELS.me.fa, labelEn: GROUP_LABELS.me.en },
               ] as const
             ).map((grp) => {
               const count =
