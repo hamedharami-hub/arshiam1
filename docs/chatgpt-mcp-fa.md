@@ -6,7 +6,7 @@
 
 ## آدرس و ورود
 
-- آدرس پیشنهادی اتصال: `https://arshiam.vercel.app/api/mcp`
+- آدرس پیشنهادی اتصال: `https://arshnaz.vercel.app/api/mcp`
 - روش احراز هویت: OAuth Authorization Code با PKCE/S256 و کلاینت عمومی ثبت‌شده با DCR.
 - resource باید دقیقاً آدرس `/api/mcp` باشد؛ توکن برای REST یا سرویس دیگری معتبر نیست.
 - کاربر در صفحهٔ `/app/connect/chatgpt` با حساب فعلی Firebase اجازه می‌دهد. مجوزهای درخواستی روی صفحه نمایش داده می‌شوند.

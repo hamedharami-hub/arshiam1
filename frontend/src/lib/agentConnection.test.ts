@@ -3,8 +3,8 @@ import { agentInstructions, agentServerOrigin, readAgentResponse } from "./agent
 
 describe("agent connection", () => {
   it("uses the Vercel server for local/native apps and preserves deployed web origins", () => {
-    expect(agentServerOrigin("http://localhost:3000", "")).toBe("https://arshiam.vercel.app");
-    expect(agentServerOrigin("capacitor://localhost", "")).toBe("https://arshiam.vercel.app");
+    expect(agentServerOrigin("http://localhost:3000", "")).toBe("https://arshnaz.vercel.app");
+    expect(agentServerOrigin("capacitor://localhost", "")).toBe("https://arshnaz.vercel.app");
     expect(agentServerOrigin("https://my-app.example", "")).toBe("https://my-app.example");
     expect(agentServerOrigin("http://localhost:3000", "https://agents.example/")).toBe("https://agents.example");
     expect(() => agentServerOrigin("http://localhost", "https://agents.example/api")).toThrow();

@@ -3,7 +3,7 @@ import { adminDb, createGrant, grantAllows, listGrants, tokenHash, type Assistan
 
 export const MCP_SCOPES: AssistantScope[] = ["tasks:read", "tasks:create", "tasks:update", "folders:read", "notes:read", "notes:create", "notes:update"];
 export function mcpOrigin() {
-  const url = new URL(process.env.MCP_PUBLIC_ORIGIN || "https://arshiam.vercel.app");
+  const url = new URL(process.env.MCP_PUBLIC_ORIGIN || "https://arshnaz.vercel.app");
   if (url.protocol !== "https:" || url.pathname !== "/" || url.search || url.hash || url.username) throw new Error("Invalid MCP public origin");
   return url.origin;
 }

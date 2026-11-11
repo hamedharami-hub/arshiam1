@@ -11,7 +11,7 @@ beforeEach(() => { testStore.enabled = true; testStore.reset(); oauthTestStore.e
 afterEach(() => { testStore.enabled = false; oauthTestStore.enabled = false; });
 it("serves initialize/list/call via stateless HTTP, rejects bad origins and rechecks revoked credentials", async () => {
   const registered = await registerClient({ redirect_uris: ["https://chatgpt.com/connector_platform_oauth_redirect"] });
-  const verifier = "a".repeat(43), resource = "https://arshiam.vercel.app/api/mcp";
+  const verifier = "a".repeat(43), resource = "https://arshnaz.vercel.app/api/mcp";
   const request = { client_id: registered.client_id, redirect_uri: registered.redirect_uris[0], resource, response_type: "code", code_challenge_method: "S256", code_challenge: createHash("sha256").update(verifier).digest("base64url"), scope: "tasks:read" };
   const url = new URL(await authorizeOwner("u", request));
   const tokens = await exchangeToken({ grant_type: "authorization_code", code: url.searchParams.get("code"), code_verifier: verifier, client_id: request.client_id, redirect_uri: request.redirect_uri, resource });

@@ -8,13 +8,13 @@ let request: any;
 beforeEach(async () => {
   testStore.enabled = true; testStore.reset(); oauthTestStore.enabled = true; oauthTestStore.records.clear();
   const client = await registerClient({ redirect_uris: ["https://chatgpt.com/connector_platform_oauth_redirect"], token_endpoint_auth_method: "none" });
-  request = { client_id: client.client_id, redirect_uri: client.redirect_uris[0], resource: "https://arshiam.vercel.app/api/mcp", response_type: "code", code_challenge_method: "S256", code_challenge: createHash("sha256").update(verifier).digest("base64url"), state: "original-state", scope: "tasks:read notes:read" };
+  request = { client_id: client.client_id, redirect_uri: client.redirect_uris[0], resource: "https://arshnaz.vercel.app/api/mcp", response_type: "code", code_challenge_method: "S256", code_challenge: createHash("sha256").update(verifier).digest("base64url"), state: "original-state", scope: "tasks:read notes:read" };
 });
 describe("MCP OAuth boundary", () => {
   it("validates PKCE, binds account/resource/client, rotates refresh and honors revocation", async () => {
     const redirect = new URL(await authorizeOwner("user-a", request));
     expect(redirect.searchParams.get("state")).toBe("original-state");
-    expect(redirect.searchParams.get("iss")).toBe("https://arshiam.vercel.app");
+    expect(redirect.searchParams.get("iss")).toBe("https://arshnaz.vercel.app");
     const exchange = { grant_type: "authorization_code", code: redirect.searchParams.get("code"), code_verifier: verifier, redirect_uri: request.redirect_uri, client_id: request.client_id, resource: request.resource };
     await expect(exchangeToken({ ...exchange, code_verifier: "b".repeat(43) })).rejects.toThrow("invalid_grant");
     const tokens = await exchangeToken(exchange);

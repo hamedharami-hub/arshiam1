@@ -1,4 +1,4 @@
-const PRODUCTION_ORIGIN = "https://arshiam.vercel.app";
+const PRODUCTION_ORIGIN = "https://arshnaz.vercel.app";
 
 /** The agent API is hosted by Vercel, separately from the FastAPI companion. */
 export function agentServerOrigin(origin: string, configured = import.meta.env.VITE_AGENT_API_URL || ""): string {

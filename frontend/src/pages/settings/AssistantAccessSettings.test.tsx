@@ -39,18 +39,18 @@ describe("AssistantAccessSettings", () => {
     vi.stubGlobal("fetch", fetchMock);
     render(<AssistantAccessSettings />);
     await waitFor(() => expect(fetchMock).toHaveBeenCalled());
-    expect(fetchMock.mock.calls[0][0]).toBe("https://arshiam.vercel.app/api/assistant-access");
-    expect(screen.getByText("https://arshiam.vercel.app/api/v1/agent")).toBeInTheDocument();
+    expect(fetchMock.mock.calls[0][0]).toBe("https://arshnaz.vercel.app/api/assistant-access");
+    expect(screen.getByText("https://arshnaz.vercel.app/api/v1/agent")).toBeInTheDocument();
     fireEvent.change(screen.getByPlaceholderText("e.g. My Personal AI Agent"), { target: { value: "Codex" } });
     // Creating a token now goes through a plain-language review step before the request.
     fireEvent.click(screen.getByRole("button", { name: "Review & create token" }));
     fireEvent.click(await screen.findByRole("button", { name: "Create token" }));
-    await waitFor(() => expect(fetchMock.mock.calls.some(([url, options]) => url === "https://arshiam.vercel.app/api/assistant-access" && options?.method === "POST")).toBe(true));
+    await waitFor(() => expect(fetchMock.mock.calls.some(([url, options]) => url === "https://arshnaz.vercel.app/api/assistant-access" && options?.method === "POST")).toBe(true));
     expect(await screen.findByDisplayValue("test-token")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Download OpenAPI" })).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Test token connection" }));
     await screen.findByText(/Token connection verified/);
-    expect(fetchMock).toHaveBeenCalledWith("https://arshiam.vercel.app/api/v1/agent/me", expect.objectContaining({ headers: { Authorization: "Bearer test-token" }, cache: "no-store" }));
+    expect(fetchMock).toHaveBeenCalledWith("https://arshnaz.vercel.app/api/v1/agent/me", expect.objectContaining({ headers: { Authorization: "Bearer test-token" }, cache: "no-store" }));
     fireEvent.click(screen.getByRole("button", { name: "Hide secret" }));
     expect(screen.queryByDisplayValue("test-token")).not.toBeInTheDocument();
   });

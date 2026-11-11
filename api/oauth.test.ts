@@ -13,7 +13,7 @@ it("advertises discoverable OAuth endpoints, S256 and the exact MCP resource", a
   const metadata = await request("metadata");
   expect(metadata.status).toBe(200); expect(metadata.data.code_challenge_methods_supported).toEqual(["S256"]);
   const resource = await request("resource");
-  expect(resource.data.resource).toBe("https://arshiam.vercel.app/api/mcp");
+  expect(resource.data.resource).toBe("https://arshnaz.vercel.app/api/mcp");
   expect(resource.data.scopes_supported).toEqual(["tasks:read"]);
 });
 it("requires an authenticated Arshiam owner before issuing a consent code", async () => {

@@ -192,7 +192,7 @@ function AssistantAccessSettingsContent() {
   const baseApiUrl =
     typeof window !== "undefined"
       ? `${agentServerOrigin(window.location.origin)}/api/v1/agent`
-      : "https://arshiam.vercel.app/api/v1/agent";
+      : "https://arshnaz.vercel.app/api/v1/agent";
   const serverOrigin = baseApiUrl.replace(/\/api\/v1\/agent$/, "");
 
   const refresh = async () => {
