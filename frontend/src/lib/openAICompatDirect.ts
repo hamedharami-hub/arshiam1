@@ -13,6 +13,7 @@ export interface DirectAIRequestOptions {
   baseUrl?: string;
   temperature?: number;
   signal?: AbortSignal;
+  imageDataUrl?: string;
 }
 
 export interface DirectAIResponse {
@@ -35,7 +36,7 @@ function parseJsonFromText(rawText: string): any {
 export async function callDirectOpenAICompat(
   options: DirectAIRequestOptions
 ): Promise<DirectAIResponse> {
-  const { provider, prompt, systemPrompt, model, apiKey, baseUrl, temperature, signal } = options;
+  const { provider, prompt, systemPrompt, model, apiKey, baseUrl, temperature, signal, imageDataUrl } = options;
 
   if (!apiKey || !apiKey.trim()) {
     throw new Error(`کلید API برای ${provider} وارد نشده است. لطفاً در تنظیمات → AI کلید خود را وارد کنید.`);
@@ -70,11 +71,14 @@ export async function callDirectOpenAICompat(
     endpoint = base.endsWith("/chat/completions") ? base : `${base}/chat/completions`;
   }
 
-  const messages: Array<{ role: "system" | "user" | "assistant"; content: string }> = [];
+  const messages: Array<{ role: "system" | "user" | "assistant"; content: unknown }> = [];
   if (systemPrompt) {
     messages.push({ role: "system", content: systemPrompt });
   }
-  messages.push({ role: "user", content: prompt });
+  const userContent = imageDataUrl
+    ? [{ type: "text", text: prompt }, { type: "image_url", image_url: { url: imageDataUrl } }]
+    : prompt;
+  messages.push({ role: "user", content: userContent });
 
   const body = {
     model: model || "gpt-4o-mini",
@@ -109,7 +113,7 @@ export async function callDirectOpenAICompat(
 export async function callDirectAnthropic(
   options: DirectAIRequestOptions
 ): Promise<DirectAIResponse> {
-  const { prompt, systemPrompt, model, apiKey, temperature, signal } = options;
+  const { prompt, systemPrompt, model, apiKey, temperature, signal, imageDataUrl } = options;
 
   if (!apiKey || !apiKey.trim()) {
     throw new Error("کلید API برای Anthropic وارد نشده است. لطفاً در تنظیمات → AI کلید خود را وارد کنید.");
@@ -123,10 +127,18 @@ export async function callDirectAnthropic(
     "anthropic-dangerous-direct-browser-access": "true",
   };
 
+  const dataMatch = imageDataUrl?.match(/^data:([^;]+);base64,(.+)$/);
+  const anthropicContent = dataMatch
+    ? [
+        { type: "image", source: { type: "base64", media_type: dataMatch[1], data: dataMatch[2] } },
+        { type: "text", text: prompt },
+      ]
+    : prompt;
+
   const body: any = {
     model: model || "claude-3-5-sonnet-latest",
     max_tokens: 4096,
-    messages: [{ role: "user", content: prompt }],
+    messages: [{ role: "user", content: anthropicContent }],
     temperature: temperature ?? 0.7,
   };
 

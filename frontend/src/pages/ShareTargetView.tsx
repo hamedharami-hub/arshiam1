@@ -3,11 +3,9 @@ import { useNavigate, useSearchParams } from "react-router-dom";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
-import { ListTodo, FileText, Type, AlignLeft, Share2, ArrowRight, ArrowLeft, Wand2, ClipboardPaste } from "lucide-react";
+import { ListTodo, FileText, Type, AlignLeft, Share2, ArrowRight, ArrowLeft, ClipboardPaste } from "lucide-react";
 import { toast } from "sonner";
 import { useBilingual } from "@/hooks/useBilingual";
-
-const URL_RE = /https?:\/\/[^\s<>"'{}|\\`[\]]+/i;
 
 export default function ShareTargetView() {
   const [params] = useSearchParams();
@@ -23,12 +21,10 @@ export default function ShareTargetView() {
   }, [params]);
 
   const [content, setContent] = useState(incoming);
-  const [target, setTarget] = useState<"task" | "note" | "article">("task");
+  const [target, setTarget] = useState<"task" | "note">("task");
   const [field, setField] = useState<"title" | "body">(() =>
     incoming.length > 80 || incoming.includes("\n") ? "body" : "title",
   );
-
-  const urlInContent = useMemo(() => content.match(URL_RE)?.[0] || "", [content]);
 
   const paste = async () => {
     try {
@@ -44,14 +40,6 @@ export default function ShareTargetView() {
     const text = content.trim();
     if (!text) {
       navigate("/app/today", { replace: true });
-      return;
-    }
-
-    if (target === "article") {
-      const qp = new URLSearchParams();
-      if (urlInContent) qp.set("url", urlInContent);
-      qp.set("text", text);
-      navigate(`/app/rewrite-article?${qp.toString()}`, { replace: true });
       return;
     }
 
@@ -106,7 +94,7 @@ export default function ShareTargetView() {
             <div className="text-xs text-muted-foreground mb-2">
               {T("۱. کجا ذخیره بشه؟", "1. Where to save?")}
             </div>
-            <div className="grid grid-cols-3 gap-2">
+            <div className="grid grid-cols-2 gap-2">
               <button
                 type="button"
                 onClick={() => setTarget("task")}
@@ -131,65 +119,45 @@ export default function ShareTargetView() {
                 <FileText className="w-5 h-5" />
                 <span className="text-sm font-medium">{T("نوت", "Note")}</span>
               </button>
+            </div>
+          </div>
+
+          <div>
+            <div className="text-xs text-muted-foreground mb-2">
+              {T("۲. متن در کجا قرار بگیره؟", "2. Where should the text go?")}
+            </div>
+            <div className="grid grid-cols-2 gap-2">
               <button
                 type="button"
-                onClick={() => setTarget("article")}
+                onClick={() => setField("title")}
                 className={`rounded-xl border p-3 flex flex-col items-center gap-1 transition-all ${
-                  target === "article"
+                  field === "title"
                     ? "border-primary bg-primary/10 ring-2 ring-primary/30"
                     : "border-border hover:bg-accent/40"
                 }`}
               >
-                <Wand2 className="w-5 h-5" />
-                <span className="text-sm font-medium">{T("بازنویسی", "Rewrite")}</span>
+                <Type className="w-5 h-5" />
+                <span className="text-sm font-medium">{T("عنوان", "Title")}</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setField("body")}
+                className={`rounded-xl border p-3 flex flex-col items-center gap-1 transition-all ${
+                  field === "body"
+                    ? "border-primary bg-primary/10 ring-2 ring-primary/30"
+                    : "border-border hover:bg-accent/40"
+                }`}
+              >
+                <AlignLeft className="w-5 h-5" />
+                <span className="text-sm font-medium">
+                  {target === "task" ? T("توضیحات", "Description") : T("محتوا", "Content")}
+                </span>
               </button>
             </div>
           </div>
 
-          {target !== "article" && (
-            <div>
-              <div className="text-xs text-muted-foreground mb-2">
-                {T("۲. متن در کجا قرار بگیره؟", "2. Where should the text go?")}
-              </div>
-              <div className="grid grid-cols-2 gap-2">
-                <button
-                  type="button"
-                  onClick={() => setField("title")}
-                  className={`rounded-xl border p-3 flex flex-col items-center gap-1 transition-all ${
-                    field === "title"
-                      ? "border-primary bg-primary/10 ring-2 ring-primary/30"
-                      : "border-border hover:bg-accent/40"
-                  }`}
-                >
-                  <Type className="w-5 h-5" />
-                  <span className="text-sm font-medium">{T("عنوان", "Title")}</span>
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setField("body")}
-                  className={`rounded-xl border p-3 flex flex-col items-center gap-1 transition-all ${
-                    field === "body"
-                      ? "border-primary bg-primary/10 ring-2 ring-primary/30"
-                      : "border-border hover:bg-accent/40"
-                  }`}
-                >
-                  <AlignLeft className="w-5 h-5" />
-                  <span className="text-sm font-medium">
-                    {target === "task" ? T("توضیحات", "Description") : T("محتوا", "Content")}
-                  </span>
-                </button>
-              </div>
-            </div>
-          )}
-
-          {target === "article" && !urlInContent && (
-            <p className="text-xs text-muted-foreground">
-              {T("هیچ لینکی در متن پیدا نشد. لطفاً یک URL اضافه کنید.", "No URL found in the text. Please add a valid link.")}
-            </p>
-          )}
-
-          <Button onClick={submit} className="w-full" disabled={!content.trim() || (target === "article" && !urlInContent)}>
-            {target === "article" ? T("بازنویسی خبر", "Rewrite Article") : T("ادامه", "Continue")}
+          <Button onClick={submit} className="w-full" disabled={!content.trim()}>
+            {T("ادامه", "Continue")}
           </Button>
         </Card>
       </div>

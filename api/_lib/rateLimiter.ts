@@ -9,8 +9,21 @@ interface RateBucket {
 
 const windowMs = 60 * 1000; // 60 seconds
 const maxRequestsPerWindow = 60; // 60 req/min default
+const maxBuckets = 2000;
 
 const buckets = new Map<string, RateBucket>();
+
+function pruneBuckets(now: number): void {
+  for (const [bucketKey, bucket] of buckets) {
+    bucket.tokens = bucket.tokens.filter((ts) => now - ts < windowMs);
+    if (bucket.tokens.length === 0) buckets.delete(bucketKey);
+  }
+  while (buckets.size >= maxBuckets) {
+    const oldestKey = buckets.keys().next().value;
+    if (!oldestKey) break;
+    buckets.delete(oldestKey);
+  }
+}
 
 export function checkRateLimit(key: string, limit = maxRequestsPerWindow): {
   allowed: boolean;
@@ -21,13 +34,13 @@ export function checkRateLimit(key: string, limit = maxRequestsPerWindow): {
   let bucket = buckets.get(key);
 
   if (!bucket) {
+    if (buckets.size >= maxBuckets) pruneBuckets(now);
     bucket = { tokens: [] };
     buckets.set(key, bucket);
   }
 
   // Filter out timestamps older than the sliding window
   bucket.tokens = bucket.tokens.filter((ts) => now - ts < windowMs);
-
   if (bucket.tokens.length >= limit) {
     const oldest = bucket.tokens[0] || now;
     const resetInSeconds = Math.max(1, Math.ceil((oldest + windowMs - now) / 1000));
@@ -39,6 +52,9 @@ export function checkRateLimit(key: string, limit = maxRequestsPerWindow): {
   }
 
   bucket.tokens.push(now);
+  // Refresh LRU insertion order while keeping the active bucket non-empty.
+  buckets.delete(key);
+  buckets.set(key, bucket);
   const remaining = Math.max(0, limit - bucket.tokens.length);
   return {
     allowed: true,

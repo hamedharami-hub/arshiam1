@@ -2,7 +2,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
   verifyIdToken: vi.fn(), deleteUser: vi.fn(), recursiveDelete: vi.fn(),
-  deleteFiles: vi.fn(), getFiles: vi.fn(), tokenIndexes: vi.fn(), tokenQuery: vi.fn(), tokenDelete: vi.fn(), tokenCommit: vi.fn(),
+  deleteFiles: vi.fn(), getFiles: vi.fn(), tokenIndexes: vi.fn(), moduleCodes: vi.fn(),
+  tokenQuery: vi.fn(), tokenDelete: vi.fn(), tokenCommit: vi.fn(),
 }));
 
 vi.mock("firebase-admin/app", () => ({ getApps: () => [{}] }));
@@ -11,7 +12,12 @@ vi.mock("firebase-admin/storage", () => ({ getStorage: () => ({ bucket: () => ({
 vi.mock("../_lib/assistantAccess.js", () => ({
   adminDb: () => ({
     doc: (path: string) => path, recursiveDelete: mocks.recursiveDelete,
-    collection: () => ({ where: (...args: any[]) => { mocks.tokenQuery(...args); return { limit: () => ({ get: mocks.tokenIndexes }) }; } }),
+    collection: (name: string) => name === "module_codes"
+      ? {
+          limit: () => ({ get: mocks.moduleCodes }),
+          startAfter: () => ({ limit: () => ({ get: mocks.moduleCodes }) }),
+        }
+      : { where: (...args: any[]) => { mocks.tokenQuery(...args); return { limit: () => ({ get: mocks.tokenIndexes }) }; } },
     batch: () => ({ delete: mocks.tokenDelete, commit: mocks.tokenCommit }),
   }),
   AssistantConfigurationError: class AssistantConfigurationError extends Error {},
@@ -39,6 +45,7 @@ beforeEach(() => {
   mocks.recursiveDelete.mockResolvedValue(undefined);
   mocks.deleteUser.mockResolvedValue(undefined);
   mocks.tokenIndexes.mockResolvedValue({ empty: true, docs: [] });
+  mocks.moduleCodes.mockResolvedValue({ empty: true, docs: [] });
   mocks.tokenCommit.mockResolvedValue(undefined);
 });
 
@@ -143,5 +150,23 @@ describe("DELETE /api/user/delete-account", () => {
     expect(res.statusCode).toBe(500);
     expect(res.body.error.details.stage).toBe("assistant-token-index");
     expect(mocks.deleteUser).not.toHaveBeenCalled();
+  });
+
+  it("removes module redemption receipts before Auth deletion and stays retryable on failure", async () => {
+    mocks.moduleCodes.mockResolvedValue({ empty: false, docs: [{ id: "code-a" }, { id: "code-b" }] });
+    const ok = response();
+    await handler({ method: "DELETE", headers: { authorization: "Bearer account-token" } }, ok);
+    expect(ok.statusCode).toBe(200);
+    expect(mocks.tokenDelete.mock.calls).toEqual([
+      ["module_codes/code-a/redeemers/owner-123"],
+      ["module_codes/code-b/redeemers/owner-123"],
+    ]);
+    expect(mocks.deleteUser.mock.invocationCallOrder[0]).toBeGreaterThan(mocks.tokenCommit.mock.invocationCallOrder[0]);
+
+    mocks.tokenCommit.mockRejectedValueOnce(new Error("redeemer cleanup failed"));
+    const failed = response();
+    await handler({ method: "DELETE", headers: { authorization: "Bearer account-token" } }, failed);
+    expect(failed.statusCode).toBe(500);
+    expect(failed.body.error.details.stage).toBe("module-redemptions");
   });
 });

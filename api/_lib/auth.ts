@@ -60,7 +60,7 @@ export function extractBearerToken(req: any): string | null {
  * Validates a Bearer token:
  * 1. Checks as Firebase ID Token (via accounts:lookup)
  * 2. Checks as Google OAuth Access Token via Firebase IdP exchange (accounts:signInWithIdp)
- * 3. Checks as Google OAuth Access Token via Google OAuth2 UserInfo
+ *    with optional client-ID allowlist enforcement via Google's tokeninfo endpoint.
  */
 export async function verifyToken(token: string): Promise<AuthUser | null> {
   if (!token || typeof token !== "string") {
@@ -94,6 +94,29 @@ export async function verifyToken(token: string): Promise<AuthUser | null> {
   }
 
   // 2. Try Google OAuth Access Token with signInWithIdp (exchanges OAuth access token for Firebase UID)
+  const allowedOAuthClients = (process.env.ALLOWED_GOOGLE_OAUTH_CLIENT_IDS || "")
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+  if (allowedOAuthClients.length > 0) {
+    try {
+      const infoRes = await fetch(
+        `https://oauth2.googleapis.com/tokeninfo?access_token=${encodeURIComponent(token)}`,
+        { signal: AbortSignal.timeout(10_000) },
+      );
+      if (!infoRes.ok) return null;
+      const info: any = await infoRes.json();
+      const aud = String(info?.aud || info?.azp || "");
+      const emailVerified = info?.email_verified === true || info?.email_verified === "true";
+      if (!aud || !allowedOAuthClients.includes(aud) || (info?.email && !emailVerified)) {
+        return null;
+      }
+    } catch (err) {
+      console.warn("[Auth] Google tokeninfo verification error:", err);
+      return null;
+    }
+  }
+
   try {
     const idpUrl = `https://identitytoolkit.googleapis.com/v1/accounts:signInWithIdp?key=${FIREBASE_API_KEY}`;
     const idpRes = await fetch(idpUrl, {
@@ -110,7 +133,7 @@ export async function verifyToken(token: string): Promise<AuthUser | null> {
 
     if (idpRes.ok) {
       const data: any = await idpRes.json();
-      if (data.localId) {
+      if (data.localId && data.emailVerified !== false) {
         return {
           userId: data.localId,
           email: data.email || null,
@@ -121,28 +144,6 @@ export async function verifyToken(token: string): Promise<AuthUser | null> {
     }
   } catch (err) {
     console.warn("[Auth] Google signInWithIdp error:", err);
-  }
-
-  // 3. Fallback: Direct Google OAuth2 UserInfo validation (e.g. Gemini Spark access token)
-  try {
-    const userinfoUrl = "https://www.googleapis.com/oauth2/v3/userinfo";
-    const userinfoRes = await fetch(userinfoUrl, {
-      headers: { Authorization: `Bearer ${token}` },
-      signal: AbortSignal.timeout(10_000),
-    });
-
-    if (userinfoRes.ok) {
-      const data: any = await userinfoRes.json();
-      if (data.sub) {
-        return {
-          userId: data.sub,
-          email: data.email || null,
-          displayName: data.name || data.email?.split("@")[0] || null,
-        };
-      }
-    }
-  } catch (err) {
-    console.warn("[Auth] Google OAuth2 userinfo error:", err);
   }
 
   return null;

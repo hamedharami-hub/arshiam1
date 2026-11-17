@@ -432,5 +432,45 @@ describe("callAI multi-provider support", () => {
       expect(res.data.ai_suggestions.tasks[0].title).toBe("Plan weekly workout schedule");
       expect(res.data.ai_suggestions.tasks[0].priority).toBe("high");
     });
+
+    it("sends multimodal inlineData and dedicated system prompt for image_to_tasks", async () => {
+      saveAISettings({
+        default: { provider: "gemini", apiKey: "test-gemini-key", model: "gemini-2.5-flash" },
+        perOp: {},
+      });
+
+      let capturedBody: any;
+      global.fetch = vi.fn().mockImplementation(async (url: string, init?: RequestInit) => {
+        if (url.startsWith("https://example.test/")) {
+          return new Response(new Uint8Array([1, 2, 3, 4]), {
+            status: 200,
+            headers: { "Content-Type": "image/png" },
+          });
+        }
+        capturedBody = JSON.parse(String(init?.body || "{}"));
+        return {
+          ok: true,
+          json: async () => ({
+            candidates: [{
+              content: {
+                parts: [{ text: JSON.stringify({ tasks: [{ title: "Call dentist", priority: "medium", due_date: null }] }) }],
+              },
+            }],
+          }),
+        };
+      });
+
+      const res = await callAI("image_to_tasks" as any, {
+        imageUrl: "https://example.test/whiteboard.png",
+        text: "Extract actionable tasks from this image.",
+      }, undefined, undefined, "en");
+
+      expect(capturedBody.systemInstruction.parts[0].text).toContain('"tasks"');
+      expect(capturedBody.contents[0].parts[0].text).toBe("Extract actionable tasks from this image.");
+      expect(capturedBody.contents[0].parts[1]).toEqual({
+        inlineData: { mimeType: "image/png", data: "AQIDBA==" },
+      });
+      expect(res.data?.tasks).toEqual([{ title: "Call dentist", priority: "medium", due_date: null }]);
+    });
   });
 });

@@ -7,7 +7,7 @@ const save = vi.hoisted(() => vi.fn(async (_owner: string, _task: { due_date: st
 vi.mock("@/hooks/useAuth", () => ({ useAuth: () => ({ user: { id: "owner" } }) }));
 vi.mock("@/hooks/useBilingual", () => ({ useBilingual: () => ({ T: (_fa: string, en: string) => en, isEn: true }) }));
 vi.mock("@/hooks/useDeviceFormFactor", () => ({ useDeviceFormFactor: () => ({ prefersDialog: true }) }));
-vi.mock("@/lib/appModules", () => ({ isPathAllowed: () => false }));
+vi.mock("@/lib/appModules", () => ({ isPathAllowed: () => false, hasModule: () => false }));
 vi.mock("@/lib/firestoreDataService", () => ({ upsertTask: save, getDailyCheckin: async () => null }));
 vi.mock("@/lib/firebaseStore", () => ({ firebaseStore: { from: () => { const query: any = { select: () => query, eq: () => query, maybeSingle: async () => ({ data: null }), insert: async () => ({ data: null }) }; return query; } } }));
 

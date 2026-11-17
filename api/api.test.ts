@@ -304,6 +304,28 @@ describe("Authentication & Security Layer (_lib/auth.ts)", () => {
       global.fetch = originalFetch;
     }
   });
+
+  it("rejects Google OAuth tokens for disallowed client IDs and refuses unverified userinfo sub fallback", async () => {
+    const originalFetch = global.fetch;
+    process.env.ALLOWED_GOOGLE_OAUTH_CLIENT_IDS = "approved-client.apps.googleusercontent.com";
+    global.fetch = vi.fn().mockImplementation(async (url: string) => {
+      if (url.includes("oauth2.googleapis.com/tokeninfo")) {
+        return { ok: true, json: async () => ({ aud: "rogue-client.apps.googleusercontent.com", email_verified: "true", email: "user@example.com" }) };
+      }
+      if (url.includes("oauth2/v3/userinfo")) {
+        return { ok: true, json: async () => ({ sub: "google_sub_123", email: "user@example.com" }) };
+      }
+      return { ok: false, status: 400 };
+    }) as any;
+    try {
+      expect(await verifyToken("rogue_oauth_token")).toBeNull();
+      delete process.env.ALLOWED_GOOGLE_OAUTH_CLIENT_IDS;
+      expect(await verifyToken("userinfo_only_token")).toBeNull();
+    } finally {
+      delete process.env.ALLOWED_GOOGLE_OAUTH_CLIENT_IDS;
+      global.fetch = originalFetch;
+    }
+  });
 });
 
 describe("Firestore Encoding & User Isolation (_lib/firestore.ts)", () => {

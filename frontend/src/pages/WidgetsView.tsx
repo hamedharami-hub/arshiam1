@@ -1,6 +1,6 @@
 import { HeaderTitlePortal } from "@/components/HeaderTitlePortal";
 import { useState, useEffect, useMemo, useCallback, useRef } from "react";
-import { isPathAllowed } from "@/lib/appModules";
+import { hasModule } from "@/lib/appModules";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import {
   LayoutGrid,
@@ -863,7 +863,7 @@ export default function WidgetsView() {
                           <Mic className="h-4 w-4 text-primary animate-pulse" />
                           <span>{T("ویس / حرف من", "Voice / Speech")}</span>
                         </Button>
-                        {isPathAllowed("/app/checkin") && (
+                        {hasModule("mind") && (
                           <Button
                             variant="outline"
                             size="sm"
@@ -874,7 +874,7 @@ export default function WidgetsView() {
                             <span>{T("چک‌این ذهن", "Mind Check-in")}</span>
                           </Button>
                         )}
-                        {isPathAllowed("/app/breathing") && (
+                        {hasModule("mind") && (
                           <Button
                             variant="outline"
                             size="sm"

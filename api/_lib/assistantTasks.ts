@@ -23,7 +23,7 @@ function auditData(grant: AssistantGrant, action: string, taskId: string, before
 }
 
 export async function listAssistantTasks(grant: AssistantGrant, search?: string, limit = 100) {
-  const snapshot = await collection(grant).get();
+  const snapshot = await collection(grant).limit(1000).get();
   const needle = (search || "").toLocaleLowerCase();
   const pageSize = Number.isFinite(limit) ? Math.min(Math.max(Math.trunc(limit), 1), 100) : 100;
   return snapshot.docs.map((doc) => stripRemovedTaskTimeFields({ id: doc.id, ...doc.data() }))

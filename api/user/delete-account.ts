@@ -91,6 +91,23 @@ export default async function handler(req: any, res: any) {
           await batch.commit();
         }
       },
+      deleteModuleRedemptions: async (ownerUid) => {
+        stage = "module-redemptions";
+        const codes = db.collection("module_codes");
+        let cursor: any = null;
+        while (true) {
+          const query = cursor ? codes.startAfter(cursor).limit(400) : codes.limit(400);
+          const snapshot = await query.get();
+          if (snapshot.empty) break;
+          const batch = db.batch();
+          for (const doc of snapshot.docs) {
+            batch.delete(db.doc(`module_codes/${doc.id}/redeemers/${ownerUid}`));
+          }
+          await batch.commit();
+          if (snapshot.docs.length < 400) break;
+          cursor = snapshot.docs[snapshot.docs.length - 1];
+        }
+      },
       deleteAuthUser: async (ownerUid) => {
         stage = "auth";
         await auth.deleteUser(ownerUid);

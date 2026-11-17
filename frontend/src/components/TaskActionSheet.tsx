@@ -400,7 +400,7 @@ export default function TaskActionSheet({
   const mainView = (
     <div className="space-y-4 animate-fade-in">
       {/* Top icon row: Pin, Share, Won't Do, Delete */}
-      <div className="grid grid-cols-4 gap-2">
+      <div className={`grid gap-2 ${isFeatureEnabled("sharing") ? "grid-cols-4" : "grid-cols-3"}`}>
         <Tile
           icon={task.pinned ? PinOff : Pin}
           label={task.pinned ? T("حذف پین", "Unpin") : T("پین", "Pin")}

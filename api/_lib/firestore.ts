@@ -130,10 +130,14 @@ export function getHeaders(user: AuthUser): Record<string, string> {
   return headers;
 }
 
+function fetchWithTimeout(url: string, init: RequestInit = {}, timeoutMs = 10_000) {
+  return fetch(url, { ...init, signal: init.signal ?? AbortSignal.timeout(timeoutMs) });
+}
+
 /** Query a single equality-filtered field at Firestore instead of downloading every task. */
 async function queryUserTasksByField(user: AuthUser, field: string, value: unknown): Promise<any[]> {
   const parentUrl = `${BASE_FIRESTORE_URL}/users/${encodeURIComponent(user.userId)}`;
-  const response = await fetch(`${parentUrl}:runQuery`, {
+  const response = await fetchWithTimeout(`${parentUrl}:runQuery`, {
     method: "POST",
     headers: getHeaders(user),
     body: JSON.stringify({
@@ -192,12 +196,14 @@ export async function listUserTasks(
     const baseUrl = `${BASE_FIRESTORE_URL}/users/${encodeURIComponent(user.userId)}/tasks`;
     const documents: any[] = [];
     const seenTokens = new Set<string>();
+    const maxPages = 20;
     let pageToken: string | undefined;
+    let pages = 0;
     do {
       const url = new URL(baseUrl);
       url.searchParams.set("pageSize", "100");
       if (pageToken) url.searchParams.set("pageToken", pageToken);
-      const res = await fetch(url.toString(), { method: "GET", headers: getHeaders(user) });
+      const res = await fetchWithTimeout(url.toString(), { method: "GET", headers: getHeaders(user) });
       if (!res.ok) {
         if (res.status === 404 && documents.length === 0) return [];
         const errText = await res.text();
@@ -206,12 +212,13 @@ export async function listUserTasks(
       }
       const data: any = await res.json();
       documents.push(...(data.documents || []));
+      pages += 1;
       pageToken = data.nextPageToken || undefined;
       if (pageToken) {
         if (seenTokens.has(pageToken)) throw new Error("Firestore returned a repeated page token.");
         seenTokens.add(pageToken);
       }
-    } while (pageToken);
+    } while (pageToken && pages < maxPages);
     tasks = documents.map(parseFirestoreDoc);
   }
 
@@ -274,7 +281,7 @@ export async function getUserTaskById(
   const url = `${BASE_FIRESTORE_URL}/users/${encodeURIComponent(
     user.userId
   )}/tasks/${encodeURIComponent(taskId)}`;
-  const res = await fetch(url, {
+  const res = await fetchWithTimeout(url, {
     method: "GET",
     headers: getHeaders(user),
   });
@@ -325,7 +332,7 @@ export async function createUserTask(
   const url = `${BASE_FIRESTORE_URL}/users/${encodeURIComponent(
     user.userId
   )}/tasks?documentId=${encodeURIComponent(taskId)}`;
-  const res = await fetch(url, {
+  const res = await fetchWithTimeout(url, {
     method: "POST",
     headers: getHeaders(user),
     body: JSON.stringify({
@@ -403,7 +410,7 @@ export async function updateUserTask(
   const url = `${BASE_FIRESTORE_URL}/users/${encodeURIComponent(
     user.userId
   )}/tasks/${encodeURIComponent(taskId)}?${updateMaskQuery}`;
-  const res = await fetch(url, {
+  const res = await fetchWithTimeout(url, {
     method: "PATCH",
     headers: getHeaders(user),
     body: JSON.stringify({
@@ -435,7 +442,7 @@ export async function deleteUserTask(
   const url = `${BASE_FIRESTORE_URL}/users/${encodeURIComponent(
     user.userId
   )}/tasks/${encodeURIComponent(taskId)}`;
-  const res = await fetch(url, {
+  const res = await fetchWithTimeout(url, {
     method: "DELETE",
     headers: getHeaders(user),
   });
@@ -466,7 +473,7 @@ export async function getTodayTasks(user: AuthUser, userTimeZone: string, now = 
 }> {
   const timeZone = normalizeTimeZone(userTimeZone);
   if (!timeZone) throw new Error("A valid IANA time zone is required to calculate today's tasks.");
-  const allTasks = await listUserTasks(user, { limit: Number.MAX_SAFE_INTEGER });
+  const allTasks = await listUserTasks(user, { limit: 2000 });
   const todayStr = localDayOf(now, timeZone);
   if (!todayStr) throw new Error("Could not calculate the current local date.");
 

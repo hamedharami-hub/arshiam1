@@ -33,11 +33,20 @@ function view() {
 
 function chooseFile(text: Promise<string> = Promise.resolve(JSON.stringify({ tasks: [{ id: "imported-task" }], notes: [{ id: "imported-note" }] }))) {
   let input: HTMLInputElement | undefined;
-  const click = vi.spyOn(HTMLInputElement.prototype, "click").mockImplementation(function (this: HTMLInputElement) { input = this; });
+  const createElement = document.createElement.bind(document);
+  const create = vi.spyOn(document, "createElement").mockImplementation(((tagName: string, options?: ElementCreationOptions) => {
+    const element = createElement(tagName, options);
+    if (tagName.toLowerCase() === "input") {
+      vi.spyOn(element as HTMLInputElement, "click").mockImplementation(() => {
+        input = element as HTMLInputElement;
+      });
+    }
+    return element;
+  }) as typeof document.createElement);
   fireEvent.click(screen.getByRole("button", { name: "settings.importJson" }));
+  create.mockRestore();
   expect(input).toBeDefined();
   fireEvent.change(input!, { target: { files: [{ name: "backup.json", text: () => text }] } });
-  click.mockRestore();
 }
 
 beforeEach(() => {

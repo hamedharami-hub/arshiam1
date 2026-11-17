@@ -73,21 +73,73 @@ export async function callAI(
     systemPrompt += `\n${personalizationContext}`;
   }
 
-  let promptText = typeof input === "string" ? input : JSON.stringify(input);
+  const imageInputUrl =
+    input && typeof input === "object" && typeof input.imageUrl === "string" && input.imageUrl.trim()
+      ? input.imageUrl.trim()
+      : undefined;
+  let promptText = imageInputUrl
+    ? (typeof input.text === "string" && input.text.trim() ? input.text : "Analyze the attached image.")
+    : (typeof input === "string" ? input : JSON.stringify(input));
   if (context) promptText = `زمینه (Context):\n${context}\n\nورودی:\n${promptText}`;
   if (action) promptText = `دستور (Action): ${action}\n\n${promptText}`;
+
+  const loadImagePayload = async (imageUrl: string, signal?: AbortSignal): Promise<{ mimeType: string; data: string; dataUrl: string }> => {
+    const dataMatch = imageUrl.match(/^data:([^;]+);base64,(.+)$/);
+    if (dataMatch) return { mimeType: dataMatch[1], data: dataMatch[2], dataUrl: imageUrl };
+    const resp = await fetch(imageUrl, { signal });
+    if (!resp.ok) throw new Error("تصویر پیوست برای پردازش هوش مصنوعی قابل دریافت نیست.");
+    const contentType = (resp.headers.get("content-type") || "image/jpeg").split(";")[0].trim();
+    const buffer = await resp.arrayBuffer();
+    if (buffer.byteLength === 0 || buffer.byteLength > 20 * 1024 * 1024) {
+      throw new Error("حجم تصویر پیوست نامعتبر است یا بیش از ۲۰ مگابایت است.");
+    }
+    const bytes = new Uint8Array(buffer);
+    let binary = "";
+    const chunkSize = 0x8000;
+    for (let i = 0; i < bytes.length; i += chunkSize) {
+      binary += String.fromCharCode(...bytes.subarray(i, i + chunkSize));
+    }
+    const base64 = btoa(binary);
+    return { mimeType: contentType, data: base64, dataUrl: `data:${contentType};base64,${base64}` };
+  };
+
+  let cachedImagePromise: Promise<{ mimeType: string; data: string; dataUrl: string }> | null = null;
+  const getImagePayload = () => {
+    if (!imageInputUrl) return Promise.resolve(undefined);
+    if (!cachedImagePromise) cachedImagePromise = loadImagePayload(imageInputUrl, opts?.signal);
+    return cachedImagePromise;
+  };
 
   const invoke = async (model: string) => {
     if (settings.provider === "gemini") {
       const { getGeminiApiKey, callDirectGemini } = await import("./geminiDirect");
       const geminiKey = settings.apiKey || getGeminiApiKey();
       if (!geminiKey) throw new AIProviderError(aiErrorMessage("invalid_key", lang === "en" ? "en" : "fa", { provider: "Gemini" }), "invalid_key");
-      return callDirectGemini({ prompt: promptText, systemPrompt, model, apiKey: geminiKey, signal: opts?.signal });
+      const img = await getImagePayload();
+      return callDirectGemini({
+        prompt: promptText, systemPrompt, model, apiKey: geminiKey, signal: opts?.signal,
+        ...(img ? { inlineImage: { mimeType: img.mimeType, data: img.data } } : {}),
+      });
+    }
+    let imageDataUrl = imageInputUrl;
+    if (imageInputUrl) {
+      if (settings.provider === "anthropic" || imageInputUrl.startsWith("data:")) {
+        const img = await getImagePayload();
+        imageDataUrl = img?.dataUrl;
+      } else {
+        try {
+          const img = await getImagePayload();
+          if (img) imageDataUrl = img.dataUrl;
+        } catch {
+          imageDataUrl = imageInputUrl;
+        }
+      }
     }
     const { callDirectOpenAICompat } = await import("./openAICompatDirect");
     return callDirectOpenAICompat({
       provider: settings.provider as "openai" | "xai" | "groq" | "openrouter" | "custom" | "anthropic",
       prompt: promptText, systemPrompt, model, apiKey: settings.apiKey, baseUrl: settings.baseUrl, signal: opts?.signal,
+      ...(imageDataUrl ? { imageDataUrl } : {}),
     });
   };
   const supported = ["gemini", "openai", "xai", "groq", "openrouter", "custom", "anthropic"];

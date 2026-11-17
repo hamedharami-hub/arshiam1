@@ -1,5 +1,5 @@
 import { createHmac, randomBytes } from "node:crypto";
-import { adminDb, verifyFirebaseSession } from "../_lib/assistantAccess.js";
+import { adminDb, hasFirebaseAdminConfig, verifyFirebaseSession } from "../_lib/assistantAccess.js";
 import { extractBearerToken } from "../_lib/auth.js";
 import { handleCors } from "../_lib/response.js";
 
@@ -49,7 +49,7 @@ export default async function handler(req: any, res: any) {
   const needsSigningSecret =
     (req.method === "POST" && parts.join("/") === "redeem") ||
     (req.method === "POST" && parts.join("/") === "admin/codes");
-  if ((!process.env.FIREBASE_SERVICE_ACCOUNT_JSON && !process.env.GOOGLE_APPLICATION_CREDENTIALS) ||
+  if (!hasFirebaseAdminConfig() ||
       (needsSigningSecret && (!process.env.ARSH_SIGNING_SECRET || process.env.ARSH_SIGNING_SECRET.length < 32))) {
     return fail(res, 503, "Module service is not configured: Firebase Admin credentials or signing secret are missing.");
   }

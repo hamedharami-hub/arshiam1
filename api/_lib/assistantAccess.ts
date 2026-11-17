@@ -55,6 +55,16 @@ export const testStore = {
   },
 };
 
+export function hasFirebaseAdminConfig(): boolean {
+  return Boolean(
+    process.env.FIREBASE_SERVICE_ACCOUNT_JSON ||
+    process.env.GOOGLE_APPLICATION_CREDENTIALS ||
+    process.env.K_SERVICE ||
+    process.env.FUNCTION_TARGET ||
+    process.env.FIREBASE_CONFIG,
+  );
+}
+
 function adminApp() {
   if (getApps().length) return getApps()[0];
   const serviceAccount = process.env.FIREBASE_SERVICE_ACCOUNT_JSON;
@@ -62,7 +72,12 @@ function adminApp() {
     const parsed = JSON.parse(serviceAccount);
     return initializeApp({ credential: cert(parsed), projectId: parsed.project_id });
   }
-  if (process.env.GOOGLE_APPLICATION_CREDENTIALS) {
+  if (
+    process.env.GOOGLE_APPLICATION_CREDENTIALS ||
+    process.env.K_SERVICE ||
+    process.env.FUNCTION_TARGET ||
+    process.env.FIREBASE_CONFIG
+  ) {
     return initializeApp({ credential: applicationDefault(), projectId: (firebaseConfig as any).projectId });
   }
   throw new AssistantConfigurationError();
@@ -198,7 +213,7 @@ export async function listGrants(userId: string): Promise<AssistantGrant[]> {
       .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
   }
 
-  const snapshot = await adminDb().collection(`users/${userId}/assistant_grants`).get();
+  const snapshot = await adminDb().collection(`users/${userId}/assistant_grants`).limit(200).get();
   return snapshot.docs
     .map((doc) => doc.data() as AssistantGrant)
     .sort((a, b) => b.createdAt.localeCompare(a.createdAt));

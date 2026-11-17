@@ -1,5 +1,5 @@
 import { Capacitor } from "@capacitor/core";
-import { arshFetch, ArshApiError } from "@/lib/arshApi";
+import { ARSH_API_BASE, arshFetch, ArshApiError } from "@/lib/arshApi";
 import type { RemoteAttachment } from "@/lib/attachmentUpload";
 
 export type GoogleStatus = { configured: boolean; picker_ready: boolean; connected: boolean; email?: string | null; connected_at?: string | null };
@@ -8,6 +8,9 @@ type ImportResult = { items: RemoteAttachment[]; errors: Array<{ detail: string 
 let statusCache: { at: number; p: Promise<GoogleStatus> } | null = null;
 
 export function getGoogleStatus(fresh = false): Promise<GoogleStatus> {
+  if (!ARSH_API_BASE) {
+    return Promise.resolve({ configured: false, picker_ready: false, connected: false });
+  }
   if (fresh || !statusCache || Date.now() - statusCache.at > 60_000) {
     const p = arshFetch<GoogleStatus>("/api/arsh/google/status");
     statusCache = { at: Date.now(), p };

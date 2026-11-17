@@ -50,6 +50,10 @@ CRITICAL SAFETY AND ETHICAL RULES:
 Always include all object keys and arrays, even when an array is empty. Return at most 10 tasks, 10 folders, and 15 tags. Do not add keys outside the schema.
 Task priority must be one of none, low, medium, or high.
 Do not include any extra text outside the JSON object. Match the user's language (Persian or English).`,
+  image_to_tasks: `Extract actionable tasks visible or implied by the attached image and the user's instructions. Return ONLY valid JSON in this exact shape: {"tasks":[{"title":"actionable task title","description":"optional context","priority":"medium","due_date":null}]}. priority must be one of none, low, medium, or high. Use due_date (ISO 8601) only when a date or deadline is clearly visible or requested; otherwise null. Match the user's language and omit prose outside the JSON.`,
+  image_extract: `Extract all readable text, lists, tables, dates, and structured details from the attached image accurately in clean Markdown. Preserve the original language(s) of the content.`,
+  image_summarize: `Summarize and explain the key information, action points, and context shown in the attached image using clear Markdown headings and bullets. Match the user's language.`,
+  image_research: `Analyze the attached image and write a structured research note explaining concepts, references, questions to follow up on, and practical takeaways in Markdown. Match the user's language.`,
 };
 
 export function getGeminiApiKey(): string | null {
@@ -105,6 +109,7 @@ export async function callDirectGemini(options: {
   apiKey?: string;
   temperature?: number;
   signal?: AbortSignal;
+  inlineImage?: { mimeType: string; data: string };
 }): Promise<{ text: string; data?: any; provider: string; model: string }> {
   const apiKey = options.apiKey || getGeminiApiKey();
   if (!apiKey) {
@@ -114,11 +119,16 @@ export async function callDirectGemini(options: {
   const model = normalizeGeminiModel(options.model);
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(apiKey)}`;
 
+  const parts: Array<Record<string, unknown>> = [{ text: options.prompt }];
+  if (options.inlineImage) {
+    parts.push({ inlineData: { mimeType: options.inlineImage.mimeType, data: options.inlineImage.data } });
+  }
+
   const body: any = {
     contents: [
       {
         role: "user",
-        parts: [{ text: options.prompt }],
+        parts,
       },
     ],
     generationConfig: {

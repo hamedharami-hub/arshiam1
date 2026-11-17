@@ -2,7 +2,7 @@ import { useTaskPlanningLabel } from "./TaskPlanningPicker";
 import { TaskScheduleSheet } from "./TaskScheduleSheet";
 import { TaskDeadlineIndicator } from "./TaskDeadlineIndicator";
 import React, { memo, useMemo, useRef } from "react";
-import { isPathAllowed } from "@/lib/appModules";
+import { hasModule } from "@/lib/appModules";
 import {
   CornerDownRight, ChevronDown, ChevronRight, Pin, Ban, CircleDot, Flag,
   GripVertical, Calendar, Repeat, GitBranch, Check, Trash2, Clock, FolderInput, Brain,
@@ -272,7 +272,7 @@ const TaskListItemComponent = ({
                   data-task-row-open
                   className="flex-1 min-w-0 cursor-pointer select-none text-start rounded-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40"
                   onClick={() => {
-                    if (isPathAllowed("/app/checkin") && (t.title.startsWith("چک‌این روزانه") || t.title.startsWith("Daily Check-in"))) { navigate("/app/checkin"); return; }
+                    if (hasModule("mind") && (t.title.startsWith("چک‌این روزانه") || t.title.startsWith("Daily Check-in"))) { navigate("/app/checkin"); return; }
                     onSelectTask(t);
                   }}
                   onDoubleClick={(e) => {

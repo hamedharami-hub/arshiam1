@@ -170,6 +170,12 @@ function AssistantAccessSettingsContent() {
   const [testing, setTesting] = useState(false);
   const [connectionResult, setConnectionResult] = useState("");
 
+  const baseApiUrl =
+    typeof window !== "undefined"
+      ? `${agentServerOrigin(window.location.origin)}/api/v1/agent`
+      : "https://arshnaz.vercel.app/api/v1/agent";
+  const serverOrigin = baseApiUrl.replace(/\/api\/v1\/agent$/, "");
+
   const testConnection = async () => {
     if (!newToken || testing) return;
     setTesting(true);
@@ -188,12 +194,6 @@ function AssistantAccessSettingsContent() {
       if (active.current) setConnectionResult(error instanceof Error ? error.message : T("آزمایش اتصال ناموفق بود", "Connection test failed"));
     } finally { deadline.dispose(); if (active.current) setTesting(false); }
   };
-
-  const baseApiUrl =
-    typeof window !== "undefined"
-      ? `${agentServerOrigin(window.location.origin)}/api/v1/agent`
-      : "https://arshnaz.vercel.app/api/v1/agent";
-  const serverOrigin = baseApiUrl.replace(/\/api\/v1\/agent$/, "");
 
   const refresh = async () => {
     if (!active.current) return;

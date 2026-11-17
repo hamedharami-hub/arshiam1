@@ -5,6 +5,7 @@ import {
   adminDb,
   AssistantConfigurationError,
   authenticateAssistant,
+  grantAllows,
   testStore,
   type AssistantGrant,
 } from "./assistantAccess.js";
@@ -170,7 +171,7 @@ async function getCollectionDocs(grant: AssistantGrant, collectionName: string):
     return collectionName === "tasks" ? rows.map(stripRemovedTaskTimeFields) : rows;
   }
 
-  const snapshot = await adminDb().collection(`users/${grant.userId}/${collectionName}`).get();
+  const snapshot = await adminDb().collection(`users/${grant.userId}/${collectionName}`).limit(1000).get();
   const rows = snapshot.docs.map((d) => ({ id: d.id, ...d.data() }));
   return collectionName === "tasks" ? rows.map(stripRemovedTaskTimeFields) : rows;
 }
@@ -1058,6 +1059,14 @@ async function handleGetAuditLog(grant: AssistantGrant, query: any, res: any) {
     }
   }
 
+  logs = logs.filter((entry) => {
+    const domain = String(entry?.action || "").split(":")[0];
+    if (domain === "tasks" || domain === "folders" || domain === "memories" || domain === "calendar") {
+      return grantAllows(grant.userId, grant, `${domain}:read`);
+    }
+    return grantAllows(grant.userId, grant, "tasks:read");
+  });
+
   logs.sort((a, b) => String(b.timestamp || "").localeCompare(String(a.timestamp || "")));
   const page = Number(query.page || 1);
   const pageSize = Number(query.page_size || 50);
@@ -1080,8 +1089,10 @@ export async function handleAgentRequest(req: any, res: any): Promise<void> {
     return sendError(res, 403, "HTTPS_REQUIRED", "Requests must be transmitted securely over HTTPS.");
   }
 
-  // Rate Limiting
-  const clientKey = createHash("sha256").update(req.headers?.authorization || req.socket?.remoteAddress || "global_client").digest("hex");
+  // Rate limiting keyed by verified client network source (never unverified Authorization header)
+  const forwardedFor = typeof req.headers?.["x-forwarded-for"] === "string" ? req.headers["x-forwarded-for"].split(",")[0].trim() : "";
+  const clientSource = forwardedFor || req.socket?.remoteAddress || "global_client";
+  const clientKey = createHash("sha256").update(`ip:${clientSource}`).digest("hex");
   const rateLimit = checkRateLimit(clientKey);
   res.setHeader("X-RateLimit-Remaining", String(rateLimit.remaining));
   if (!rateLimit.allowed) {
@@ -1128,8 +1139,16 @@ export async function handleAgentRequest(req: any, res: any): Promise<void> {
 
     // 2. /api/v1/agent/audit-log
     if (segments.length === 1 && segments[0] === "audit-log" && method === "GET") {
-      const grant = await authenticateAssistant(req, res, "tasks:read");
+      const grant = await authenticateAssistant(req, res);
       if (!grant) return;
+      const canReadAudit =
+        grantAllows(grant.userId, grant, "tasks:read") ||
+        grantAllows(grant.userId, grant, "folders:read") ||
+        grantAllows(grant.userId, grant, "memories:read") ||
+        grantAllows(grant.userId, grant, "calendar:read");
+      if (!canReadAudit) {
+        return sendError(res, 403, "FORBIDDEN", "Insufficient scope. At least one read scope is required.");
+      }
       return handleGetAuditLog(grant, req.query || {}, res);
     }
 

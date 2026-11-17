@@ -5,7 +5,7 @@ import { useSidebar } from "@/components/ui/sidebar";
 import { haptic } from "@/lib/haptics";
 import { navigationInteractionBlocked } from "@/lib/appNavigation";
 
-const ROOTS = new Set(["/app/today", "/app/tomorrow", "/app/next7", "/app/inbox", "/app/notes", "/app/calendar", "/app/habits"]);
+const ROOTS = new Set(["/app/today", "/app/tomorrow", "/app/next7", "/app/inbox", "/app/notes", "/app/calendar"]);
 
 /** One web edge owner: sidebar edge opens the drawer; opposite edge goes back. */
 export default function EdgeSwipeHandler() {

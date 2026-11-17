@@ -1,19 +1,11 @@
 import React, { useState } from "react";
 import { isPathAllowed, useModules } from "@/lib/appModules";
+import { findFeature } from "@/lib/featureRegistry";
 import {
   CalendarDays,
   FolderTree,
   Tag,
-  Inbox,
-  Sun,
-  Calendar,
   LayoutGrid,
-  Clock,
-  Filter,
-  Timer,
-  BarChart3,
-  Compass,
-  FileText,
   GripVertical,
   ArrowUp,
   ArrowDown,
@@ -67,22 +59,14 @@ import {
   SIDEBAR_MAX_WIDTH,
 } from "@/lib/sidebarWidth";
 
-const QUICK_LINK_ICONS: Record<string, any> = {
-  "/app/today": CalendarDays,
+const SPECIAL_QUICK_LINK_ICONS: Record<string, any> = {
   __folders: FolderTree,
   __tags: Tag,
-  "/app/inbox": Inbox,
-  "/app/tomorrow": Sun,
-  "/app/next7": CalendarDays,
-  "/app/calendar": Calendar,
-  "/app/widgets": LayoutGrid,
-  "/app/planning": Clock,
-  "/app/smart": Filter,
-  "/app/pomodoro": Timer,
-  "/app/stats": BarChart3,
-  "/app/notes": FileText,
-  "/app/values": Compass,
 };
+
+function resolveQuickLinkIcon(url: string) {
+  return SPECIAL_QUICK_LINK_ICONS[url] || findFeature(url)?.icon || LayoutGrid;
+}
 
 interface SortableShortcutItemProps {
   item: (typeof SIDEBAR_QUICK_LINK_OPTIONS)[number];
@@ -112,7 +96,7 @@ function SortableShortcutItem({
     transition,
   };
 
-  const Icon = QUICK_LINK_ICONS[item.url] || LayoutGrid;
+  const Icon = resolveQuickLinkIcon(item.url);
 
   return (
     <div
@@ -518,7 +502,7 @@ export function SidebarQuickLinksSettings({ isEn }: { isEn: boolean }) {
             catalogItems.map((item) => {
               const isEnabled = selected.includes(item.url);
               const orderIndex = selected.indexOf(item.url);
-              const Icon = QUICK_LINK_ICONS[item.url] || LayoutGrid;
+              const Icon = resolveQuickLinkIcon(item.url);
 
               return (
                 <div

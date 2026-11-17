@@ -740,5 +740,48 @@ describe("AI Agent API Endpoints (/api/v1/agent/*)", () => {
     // Private diary content is NOT in the audit log
     const serialized = JSON.stringify(logs);
     expect(serialized).not.toContain("Highly sensitive personal reflections");
+
+    // A tasks:read-only grant must not receive memories:* audit entries even for its own grant ID
+    const limitedGrant = {
+      id: "limited-grant",
+      userId,
+      name: "Tasks Only",
+      scopes: ["tasks:read"] as any,
+      createdAt: new Date().toISOString(),
+      expiresAt: new Date(Date.now() + 86400000).toISOString(),
+      tokenHash: "hash-limited",
+    };
+    testStore.grants.set(limitedGrant.id, limitedGrant);
+    testStore.audit.push(
+      { grantId: limitedGrant.id, userId, action: "tasks:create", entityId: "t1", safeSummary: "Public task", timestamp: new Date().toISOString() },
+      { grantId: limitedGrant.id, userId, action: "memories:create_diary", entityId: "m1", safeSummary: "Private diary title", timestamp: new Date().toISOString() },
+    );
+    const { handleAgentRequest: callAgent } = await import("./_lib/agentApi");
+    const scopedRes = createMockReqRes({ url: "/api/v1/agent/audit-log" });
+    const { INTERNAL_AGENT_GRANT } = await import("./_lib/assistantAccess");
+    scopedRes.req[INTERNAL_AGENT_GRANT] = limitedGrant;
+    await callAgent(scopedRes.req, scopedRes.res);
+    expect(scopedRes.res.statusCode).toBe(200);
+    expect(JSON.parse(scopedRes.res.body).data.map((r: any) => r.action)).toEqual(["tasks:create"]);
+  });
+
+  it("ignores spoofed unverified Authorization headers when enforcing per-client rate limits", async () => {
+    const clientIp = "203.0.113.55";
+    for (let i = 0; i < 60; i++) {
+      const { req, res } = createMockReqRes({
+        url: "/api/v1/agent/me",
+        token: `arshnaz_pat_fake_${i}`,
+        headers: { "x-forwarded-for": clientIp },
+      });
+      await handleAgentRequest(req, res);
+      expect(res.statusCode).toBe(401);
+    }
+    const { req, res } = createMockReqRes({
+      url: "/api/v1/agent/me",
+      token: "arshnaz_pat_fake_61",
+      headers: { "x-forwarded-for": clientIp },
+    });
+    await handleAgentRequest(req, res);
+    expect(res.statusCode).toBe(429);
   });
 });
