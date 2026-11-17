@@ -96,3 +96,6 @@ frontend/android/build/
 credentials.json
 *.key
 .credentials
+
+# Local firebase rule snapshots (scripts/backup-firebase-rules.sh)
+backups/
