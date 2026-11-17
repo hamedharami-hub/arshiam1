@@ -4,6 +4,7 @@ import { Loader2 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { useAuth } from "@/hooks/useAuth";
 import { Button } from "@/components/ui/button";
+import { clearGoogleRedirectGuard } from "@/lib/googleSignIn";
 
 const OAUTH_RETURN_KEY = "oauth_return_to";
 // If Firebase never resolves, do not leave the user staring at a spinner forever.
@@ -22,6 +23,11 @@ export default function AuthCallback() {
   const T = (fa: string, en: string) => (isEn ? en : fa);
   const [failed, setFailed] = useState(false);
   const [retrying, setRetrying] = useState(false);
+
+  useEffect(() => {
+    // We are back from the Google redirect: a later click may fall back again.
+    clearGoogleRedirectGuard();
+  }, []);
 
   useEffect(() => {
     if (loading) {

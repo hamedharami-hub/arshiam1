@@ -201,6 +201,8 @@ export async function loginWithGoogle(): Promise<{
       await syncUserProfileToFirestore(appUser);
       return { success: true, user: appUser };
     }
+    // No popup result: the browser blocked it and the page is going to Google.
+    if (res === null) return { success: false, fallbackNeeded: true };
   } catch (err: any) {
     return { success: false, error: googleSignInError(err?.code || ""), fallbackNeeded: false };
 

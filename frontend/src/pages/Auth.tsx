@@ -141,6 +141,9 @@ export default function Auth() {
       if (res.success) {
         toast.success(T("ورود با حساب گوگل با موفقیت انجام شد.", "Signed in with Google successfully."));
         navigate(returnTo, { replace: true });
+      } else if (res.fallbackNeeded) {
+        // The popup was blocked; the whole page is going to Google and back.
+        toast.info(T("مرورگر پنجره را بست؛ در حال انتقال به صفحهٔ گوگل…", "Popup blocked; redirecting to Google…"));
       } else {
         failAuth(res.error || T("ورود با گوگل انجام نشد.", "Google sign in failed."), "google");
       }
