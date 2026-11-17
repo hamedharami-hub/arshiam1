@@ -51,6 +51,22 @@ PATCH https://identitytoolkit.googleapis.com/admin/v2/projects/gen-lang-client-0
 - ۱۲ سناریوی آزمون روی خود قوانین اجرا شد و همه مطابق انتظار بود: ساخت پوشه/نوت/تسک در درخت خودی مجاز، نوشتن کاربر دیگر و ناشناس ممنوع، `module_access` و `user_roles` و `assistant_grants` از سمت کلاینت ممنوع، نوشتن `/_health` سطح‌بالا ممنوع.
 - دامنهٔ `arshnaz.vercel.app` در فهرست دامنه‌های مجاز ورود ثبت شد (۳۳ دامنه).
 
+## استقرار سایت (به‌روزرسانی ۱۷ نوامبر ۲۰۲۶)
+
+- Vercel از طریق **GitHub App** به مخزن `hamedharami-hub/arshiam1` وصل است؛ هر push روی `main` یک بیلد تازه می‌سازد و وضعیت آن روی همان کامیت در گیت‌هاب با نام `Vercel` دیده می‌شود:
+
+```bash
+gh api repos/hamedharami-hub/arshiam1/commits/<sha>/status
+```
+
+- نشانهٔ اتصال، نبودِ webhook در `/hooks` نیست؛ اپ گیت‌هاب جداست.
+- نسخهٔ زندهٔ سایت از `https://arshnaz.vercel.app/version.json` خوانده می‌شود (`commit` و `buildTime`).
+- ورود ابزار Vercel روی این سرور وجود ندارد؛ استقرار فقط از راه push انجام می‌شود، نه CLI.
+
+## بکاپ خودکار قوانین
+
+`scripts/backup-firebase-rules.sh` نسخهٔ زندهٔ همهٔ releaseهای قوانین (همهٔ دیتابیس‌ها + Storage) را در `backups/firebase-rules/<تاریخ>/` ذخیره می‌کند و هشت نسخهٔ آخر را نگه می‌دارد. یک روتین هفتگی (یکشنبه‌ها ۹:۰۰ صبح به وقت سیدنی) همین اسکریپت را اجرا می‌کند.
+
 ## نکته‌های عملیاتی
 
 1. بلوک `hosting` در `firebase.json` عمداً مستقر **نمی‌شود**. اگر روزی `firebase deploy` بدون `--only` اجرا شود، یک نسخهٔ نیمه‌کاره روی `*.web.app` ساخته می‌شود که مسیرهای `/api/*` در آن کار نمی‌کنند.
