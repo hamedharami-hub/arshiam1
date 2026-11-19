@@ -178,10 +178,11 @@ export default function CommandPalette() {
         if (!isCurrent()) return;
 
         const [tasksRes, notesRes, foldersRes, tagsRes] = await Promise.all([
-          firebaseStore.from("tasks").select("id,title,description").eq("user_id", owner),
-          firebaseStore.from("notes").select("id,title,content").eq("user_id", owner),
-          firebaseStore.from("folders").select("id,name").eq("user_id", owner),
-          firebaseStore.from("tags").select("id,name").eq("user_id", owner),
+          // "fast" keeps search instant: never block on a cold live listener.
+          firebaseStore.from("tasks").select("id,title,description", { source: "fast" }).eq("user_id", owner),
+          firebaseStore.from("notes").select("id,title,content", { source: "fast" }).eq("user_id", owner),
+          firebaseStore.from("folders").select("id,name", { source: "fast" }).eq("user_id", owner),
+          firebaseStore.from("tags").select("id,name", { source: "fast" }).eq("user_id", owner),
         ]);
         // Local reads may be slower than the network; they must not overwrite it later.
         await localSearch;

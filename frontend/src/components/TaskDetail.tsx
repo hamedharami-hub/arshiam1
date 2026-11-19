@@ -127,9 +127,13 @@ export const TaskDetail = forwardRef<TaskDetailHandle, {
   onOpenParentTask?: (parentId: string) => void;
   onBack?: () => void;
   hasBackHistory?: boolean;
+  /** Context for a task that does not exist yet (new-task page). Written in full on the first save. */
+  createPayload?: Partial<Task>;
+  /** The latest editor state after a write, so a host page never keeps a stale draft. */
+  onTaskChange?: (task: Task) => void;
 }>(function TaskDetail({
   task, onClose, onChanged, setConfirm, mode = "sheet", allowDelete = false, onSave,
-  onOpenParentTask, onBack, hasBackHistory,
+  onOpenParentTask, onBack, hasBackHistory, createPayload, onTaskChange,
 }, ref) {
   const { user } = useAuth();
   const { i18n } = useTranslation();
@@ -186,6 +190,12 @@ export const TaskDetail = forwardRef<TaskDetailHandle, {
   const [closePromptOpen, setClosePromptOpen] = useState(false);
   const latestTaskRef = useRef(task);
   const savedTaskRef = useRef(task);
+  /** False until the first successful write of a new-task page's document. */
+  const createdOnceRef = useRef(false);
+  // Latest editor state for hosts that mount a brand-new task; kept in a ref so
+  // an inline callback prop never re-creates the save function on every render.
+  const onTaskChangeRef = useRef(onTaskChange);
+  useEffect(() => { onTaskChangeRef.current = onTaskChange; }, [onTaskChange]);
   const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const titleInputRef = useRef<HTMLTextAreaElement | null>(null);
   const conversionRef = useRef<string | null>(null);
@@ -524,13 +534,21 @@ export const TaskDetail = forwardRef<TaskDetailHandle, {
     }
   };
 
-  const save = useCallback(async (patch: Partial<Task>, force = false, importance?: "replace"): Promise<TaskPersistenceStatus> => {
+  const save = useCallback(async (editPatch: Partial<Task>, force = false, importance?: "replace"): Promise<TaskPersistenceStatus> => {
     if (!canEdit) return "failed";
-    if (!force && !Object.keys(patch).length) return "saved";
+    if (!force && !Object.keys(editPatch).length) return "saved";
     const current = latestTaskRef.current;
     const previousSavedTask = savedTaskRef.current;
     const identity = noteEditorIdentity.current;
-    const { before: undoBefore, after: undoAfter, fields: undoFields } = captureTaskUndoSnapshots(patch, previousSavedTask);
+    // A brand-new task arrives with context the page was opened with (folder,
+    // goal, status, chosen day). The diff (`savedTaskRef`) already treats those
+    // fields as saved, so sending it alone would create the document with only
+    // what the user typed — and the task would land in the inbox instead of the
+    // folder. The first write therefore carries the whole creation payload;
+    // later writes stay diff-only so concurrent edits elsewhere are preserved.
+    const isFirstWrite = !!createPayload && !createdOnceRef.current;
+    const patch: Partial<Task> = isFirstWrite ? { ...createPayload, ...editPatch } : editPatch;
+    const { before: undoBefore, after: undoAfter, fields: undoFields } = captureTaskUndoSnapshots(editPatch, previousSavedTask);
     if (patch.parent_id !== undefined && !validateTaskParentLink(allTasks, current.id, patch.parent_id, "parent_id").valid) {
       toast.error(isEn ? "This subtask link would create a cycle and was not saved." : "این پیوند زیرتسک باعث چرخه می‌شود و ذخیره نشد.");
       return "failed";
@@ -538,6 +556,7 @@ export const TaskDetail = forwardRef<TaskDetailHandle, {
     const next = { ...current, ...patch };
     latestTaskRef.current = next;
     setT(next);
+    onTaskChangeRef.current?.(next);
     setSaveState("saving");
 
     const applyTaskSnapshot = async (snapshot: TaskUndoSnapshot, expected: TaskUndoSnapshot) => {
@@ -561,6 +580,7 @@ export const TaskDetail = forwardRef<TaskDetailHandle, {
 
     const finish = (state: "saved" | "queued") => {
       savedTaskRef.current = { ...savedTaskRef.current, ...patch };
+      if (isFirstWrite) createdOnceRef.current = true;
       if (!Object.keys(taskPatch(latestTaskRef.current, savedTaskRef.current)).length) clearTaskDraft(current.id);
       setSaveState(state);
       const isLatestUndoChange = latestTaskRef.current.id === current.id && undoFields.every((field) => sameUndoValue(latestTaskRef.current[field], undoAfter[field]));
@@ -627,7 +647,7 @@ export const TaskDetail = forwardRef<TaskDetailHandle, {
       setSaveState("error");
       throw e;
     }
-  }, [allTasks, canEdit, isEn, onChanged, user]);
+  }, [allTasks, canEdit, createPayload, isEn, onChanged, user]);
 
   const pendingPatch = taskPatch(t, savedTaskRef.current);
   const hasPendingChanges = Object.keys(pendingPatch).length > 0;

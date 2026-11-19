@@ -30,6 +30,9 @@ import {
   Terminal,
   ExternalLink,
   Sparkles,
+  Repeat,
+  CalendarCheck,
+  Target,
 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { agentInstructions, agentServerOrigin, readAgentResponse } from "@/lib/agentConnection";
@@ -43,7 +46,13 @@ export type Scope =
   | "memories:read"
   | "memories:write"
   | "calendar:read"
-  | "calendar:write";
+  | "calendar:write"
+  | "habits:read"
+  | "habits:write"
+  | "checkins:read"
+  | "checkins:write"
+  | "mind:read"
+  | "mind:write";
 
 export interface Grant {
   id: string;
@@ -96,6 +105,36 @@ const SCOPE_GROUPS = [
       { id: "calendar:write" as Scope, labelFa: "ثبت رویداد و بررسی تداخل زمانی", labelEn: "Schedule events & check conflicts" },
     ],
   },
+  {
+    id: "habits",
+    titleFa: "عادت‌ها (Habits)",
+    titleEn: "Habits",
+    icon: Repeat,
+    scopes: [
+      { id: "habits:read" as Scope, labelFa: "خواندن عادت‌ها و روزهای انجام‌شده", labelEn: "Read habits & completed days" },
+      { id: "habits:write" as Scope, labelFa: "ساخت، ویرایش و حذف عادت‌ها (شامل خواندن)", labelEn: "Create, edit & delete habits (includes read)" },
+    ],
+  },
+  {
+    id: "checkins",
+    titleFa: "چک‌این روزانه (Daily Check-in)",
+    titleEn: "Daily Check-in",
+    icon: CalendarCheck,
+    scopes: [
+      { id: "checkins:read" as Scope, labelFa: "خواندن چک‌این‌های روزانه", labelEn: "Read daily check-ins" },
+      { id: "checkins:write" as Scope, labelFa: "ثبت یا ویرایش چک‌این امروز و روزهای قبل (شامل خواندن)", labelEn: "Save or update daily check-ins (includes read)" },
+    ],
+  },
+  {
+    id: "mind",
+    titleFa: "اهداف ذهنی و ارزش‌ها (Mind Goals & Values)",
+    titleEn: "Mind Goals & Values",
+    icon: Target,
+    scopes: [
+      { id: "mind:read" as Scope, labelFa: "خواندن اهداف ذهنی و ارزش‌ها", labelEn: "Read mind goals & values" },
+      { id: "mind:write" as Scope, labelFa: "ساخت و ویرایش اهداف ذهنی و ارزش‌ها (شامل خواندن)", labelEn: "Create & edit mind goals and values (includes read)" },
+    ],
+  },
 ];
 
 const ALL_SCOPES: Scope[] = [
@@ -107,6 +146,12 @@ const ALL_SCOPES: Scope[] = [
   "memories:write",
   "calendar:read",
   "calendar:write",
+  "habits:read",
+  "habits:write",
+  "checkins:read",
+  "checkins:write",
+  "mind:read",
+  "mind:write",
 ];
 
 const READONLY_SCOPES: Scope[] = [
@@ -114,6 +159,9 @@ const READONLY_SCOPES: Scope[] = [
   "folders:read",
   "memories:read",
   "calendar:read",
+  "habits:read",
+  "checkins:read",
+  "mind:read",
 ];
 
 /** The narrowest useful preset: an agent can only read tasks. Least privilege by default. */

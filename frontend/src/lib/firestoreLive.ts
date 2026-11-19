@@ -8,10 +8,13 @@ type Row = Record<string, any>;
 type Entry = {
   rows: Map<string, Row>;
   ready: Promise<boolean>;
+  /** Resolves on the listener's first snapshot (cache or server), for latency-sensitive reads. */
+  firstSnapshot: Promise<void>;
   synced: boolean;
   failed: boolean;
   unsubscribe: () => void;
   settle: (ok: boolean) => void;
+  settleFirstSnapshot: () => void;
   fallback: ReturnType<typeof setTimeout> | null;
 };
 
@@ -28,13 +31,16 @@ function open(uid: string, table: string): Entry {
   const existing = registry.get(key);
   if (existing && !existing.failed) return existing;
   let settleFn: (ok: boolean) => void = () => {};
+  let settleFirstFn: () => void = () => {};
   const entry: Entry = {
     rows: new Map(),
     ready: new Promise((r) => { settleFn = r; }),
+    firstSnapshot: new Promise<void>((r) => { settleFirstFn = r; }),
     synced: false,
     failed: false,
     unsubscribe: () => {},
     settle: (ok: boolean) => settleFn(ok),
+    settleFirstSnapshot: () => settleFirstFn(),
     fallback: null,
   };
   registry.set(key, entry);
@@ -54,6 +60,7 @@ function open(uid: string, table: string): Entry {
         if (change.type === "removed") entry.rows.delete(change.doc.id);
         else entry.rows.set(change.doc.id, { id: change.doc.id, ...change.doc.data() });
       }
+      entry.settleFirstSnapshot();
       if (!snap.metadata.fromCache) {
         trackRead(Math.max(1, snap.docChanges().length), table);
         clearFallback();
@@ -68,6 +75,7 @@ function open(uid: string, table: string): Entry {
       entry.failed = true;
       registry.delete(key);
       clearFallback();
+      entry.settleFirstSnapshot();
       entry.settle(gotSnapshot);
     },
   );
@@ -75,9 +83,20 @@ function open(uid: string, table: string): Entry {
 }
 
 /** All rows of a user collection, or null when the caller must query Firestore directly. */
-export async function liveRows(uid: string, table: string): Promise<Row[] | null> {
+export async function liveRows(uid: string, table: string, waitMs = 6000): Promise<Row[] | null> {
   if (!uid || !isLiveEligible(table)) return null;
   const entry = open(uid, table);
+  if (waitMs < 6000) {
+    // Fast read (used by global search): take whatever the shared listener already
+    // has instead of blocking on a server snapshot. On a cold start the listener
+    // can take seconds to open, and search must not show an empty result meanwhile.
+    await Promise.race([entry.firstSnapshot, new Promise<void>((resolve) => { setTimeout(resolve, waitMs); })]);
+    if (entry.rows.size > 0) return [...entry.rows.values()];
+    if (entry.synced) return [];
+    // Nothing cached yet: let the caller read the collection directly instead of
+    // returning a false "empty" while the listener is still warming up.
+    return null;
+  }
   const ok = await entry.ready;
   if (!ok && entry.rows.size === 0) return null;
   return [...entry.rows.values()];
@@ -105,6 +124,7 @@ export function stopLiveListeners(): void {
   for (const entry of registry.values()) {
     try { entry.unsubscribe(); } catch { /* listener already gone */ }
     if (entry.fallback) { clearTimeout(entry.fallback); entry.fallback = null; }
+    entry.settleFirstSnapshot();
     entry.settle(false);
   }
   registry.clear();

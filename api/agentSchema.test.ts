@@ -43,14 +43,24 @@ describe("personal agent OpenAPI contract", () => {
     testStore.tasks.set("record", { id: "record", user_id: "schema-user", title: "Task", completed: false, start_at: "2026-01-01T09:00:00Z", end_at: "2026-01-01T10:00:00Z" });
     testStore.folders.set("record", { id: "record", user_id: "schema-user", name: "Folder" });
     testStore.notes.set("record", { id: "record", user_id: "schema-user", title: "Note", content: "Body" });
+    const now = new Date().toISOString();
+    testStore.habits.set("record", { id: "record", user_id: "schema-user", title: "Habit", frequency: "daily", color: "blue", streak: 1, completed_dates: [], created_at: now, updated_at: now });
+    testStore.checkins.set("2026-01-05", { id: "2026-01-05", user_id: "schema-user", checkin_date: "2026-01-05", mood: 6, created_at: now, updated_at: now });
+    testStore.mindGoals.set("record", { id: "record", user_id: "schema-user", domain: "family", text: "Goal", created_at: now, updated_at: now });
     for (const [path, methods] of Object.entries(schema.paths)) {
       for (const [method, operation] of Object.entries(methods)) {
         const body = path.includes("calendar/events") && method === "patch" ? { title: "Updated meeting" } : path.includes("calendar/events")
           ? { title: "Meeting", start_at: "2026-02-01T09:00:00Z", end_at: "2026-02-01T10:00:00Z" }
+          : path.includes("mind/values") ? { values: { health: { importance: 8 } } }
+          : path.includes("mind/goals") && method === "post" ? { domain: "family", text: "Weekly call" }
+          : path.includes("mind/goals") ? { text: "Updated goal" }
+          : path.includes("checkins") ? { mood: 7 }
           : path.includes("folders") ? { name: "Folder" }
           : path.includes("memories") ? { title: "Note", content: "Text" }
+          : path.includes("habits") ? { title: "Habit" }
           : { title: "Task" };
-        const req: any = { method: method.toUpperCase(), url: path.replace("{id}", "record"), headers: { authorization: `Bearer ${secret}` }, query: { start: "2026-01-01T00:00:00Z", end: "2026-03-01T00:00:00Z" }, body };
+        const url = path.replace("{id}", "record").replace("{date}", "2026-01-05");
+        const req: any = { method: method.toUpperCase(), url, headers: { authorization: `Bearer ${secret}` }, query: { start: "2026-01-01T00:00:00Z", end: "2026-03-01T00:00:00Z" }, body };
         const res: any = { statusCode: 200, setHeader() {}, end(value: string) { this.body = JSON.parse(value); } };
         await handleAgentRequest(req, res);
         expect(res.statusCode, (operation as any).operationId).toBeGreaterThanOrEqual(200);

@@ -8,6 +8,7 @@ import {
   grantAllows,
   testStore,
   type AssistantGrant,
+  type AssistantScope,
 } from "./assistantAccess.js";
 import { handleCors, parseBody, sendError, sendJson, sendRequestBodyError } from "./response.js";
 import { checkRateLimit } from "./rateLimiter.js";
@@ -63,16 +64,37 @@ async function findIdempotentResult(
     : { status: 409, body: null };
 }
 
+type AgentCollection = "tasks" | "notes" | "folders" | "habits" | "daily_checkins" | "mind_goals" | "mind_settings";
+
+/** Resolve the in-memory collection used when the test store replaces Firestore. */
+function testStoreCollection(collectionName: AgentCollection): Map<string, any> {
+  switch (collectionName) {
+    case "tasks": return testStore.tasks;
+    case "notes": return testStore.notes;
+    case "folders": return testStore.folders;
+    case "habits": return testStore.habits;
+    case "daily_checkins": return testStore.checkins;
+    case "mind_goals": return testStore.mindGoals;
+    case "mind_settings": return testStore.mindSettings;
+  }
+  throw new Error(`Unsupported agent collection: ${String(collectionName)}`);
+}
+
+/** Tasks expose the normalized schedule shape; every other collection is returned verbatim. */
+function shapeCollectionDoc(collectionName: AgentCollection, doc: any) {
+  return collectionName === "tasks" ? stripRemovedTaskTimeFields(doc) : doc;
+}
+
 async function createEntityIdempotently(
   grant: AssistantGrant,
   key: string,
   namespace: string,
   requestBody: any,
-  collectionName: "tasks" | "notes",
+  collectionName: AgentCollection,
   entityData: any,
   response: any,
   auditAction: string,
-  safeSummary: string,
+  safeSummary: string | null,
 ): Promise<IdempotentCreateResult> {
   const identity = idempotencyIdentity(grant, namespace, key);
   const requestHash = createHash("sha256").update(canonicalJson(requestBody)).digest("hex");
@@ -83,7 +105,7 @@ async function createEntityIdempotently(
     userId: grant.userId,
     action: auditAction,
     entityId: entityData.id,
-    safeSummary: grant.audience ? null : safeSummary,
+    safeSummary: grant.audience ? null : safeSummary ?? null,
     timestamp: entityData.created_at,
   };
 
@@ -94,7 +116,7 @@ async function createEntityIdempotently(
         ? { status: 201, body: previous.response }
         : { status: 409, body: null };
     }
-    const store = collectionName === "notes" ? testStore.notes : testStore.tasks;
+    const store = testStoreCollection(collectionName);
     store.set(entityData.id, entityData);
     testStore.audit.push(auditRecord);
     testStore.idempotency.set(recordId, { requestHash, response, expiresAt });
@@ -158,63 +180,60 @@ async function auditLog(
 // Database Access Helpers (Firestore / TestStore)
 // -------------------------------------------------------------
 
-async function getCollectionDocs(grant: AssistantGrant, collectionName: string): Promise<any[]> {
+async function getCollectionDocs(grant: AssistantGrant, collectionName: AgentCollection): Promise<any[]> {
   if (testStore.enabled) {
-    const storeMap: Map<string, any> =
-      collectionName === "tasks"
-        ? testStore.tasks
-        : collectionName === "folders"
-        ? testStore.folders
-        : testStore.notes;
-
-    const rows = Array.from(storeMap.values()).filter((item) => item.user_id === grant.userId);
-    return collectionName === "tasks" ? rows.map(stripRemovedTaskTimeFields) : rows;
+    const rows = Array.from(testStoreCollection(collectionName).values())
+      .filter((item) => item.user_id === grant.userId);
+    return rows.map((item) => shapeCollectionDoc(collectionName, item));
   }
 
   const snapshot = await adminDb().collection(`users/${grant.userId}/${collectionName}`).limit(1000).get();
   const rows = snapshot.docs.map((d) => ({ id: d.id, ...d.data() }));
-  return collectionName === "tasks" ? rows.map(stripRemovedTaskTimeFields) : rows;
+  return rows.map((item) => shapeCollectionDoc(collectionName, item));
 }
 
-async function getDocById(grant: AssistantGrant, collectionName: string, id: string): Promise<any | null> {
+async function getDocById(grant: AssistantGrant, collectionName: AgentCollection, id: string): Promise<any | null> {
   if (testStore.enabled) {
-    const storeMap: Map<string, any> =
-      collectionName === "tasks"
-        ? testStore.tasks
-        : collectionName === "folders"
-        ? testStore.folders
-        : testStore.notes;
-
-    const item = storeMap.get(id);
+    const item = testStoreCollection(collectionName).get(id);
     if (!item || item.user_id !== grant.userId) return null;
-    return collectionName === "tasks" ? stripRemovedTaskTimeFields(item) : item;
+    return shapeCollectionDoc(collectionName, item);
   }
 
   const doc = await adminDb().doc(`users/${grant.userId}/${collectionName}/${id}`).get();
   if (!doc.exists) return null;
   const item = { id: doc.id, ...doc.data() };
-  return collectionName === "tasks" ? stripRemovedTaskTimeFields(item) : item;
+  return shapeCollectionDoc(collectionName, item);
+}
+
+async function deleteDocById(grant: AssistantGrant, collectionName: AgentCollection, id: string): Promise<boolean> {
+  if (testStore.enabled) {
+    const store = testStoreCollection(collectionName);
+    const existing = store.get(id);
+    if (!existing || existing.user_id !== grant.userId) return false;
+    store.delete(id);
+    return true;
+  }
+
+  const ref = adminDb().doc(`users/${grant.userId}/${collectionName}/${id}`);
+  const snapshot = await ref.get();
+  if (!snapshot.exists) return false;
+  await ref.delete();
+  return true;
 }
 
 async function saveDoc(
   grant: AssistantGrant,
-  collectionName: string,
+  collectionName: AgentCollection,
   id: string,
   data: any,
   isUpdate = false
 ): Promise<any> {
   if (testStore.enabled) {
-    const storeMap: Map<string, any> =
-      collectionName === "tasks"
-        ? testStore.tasks
-        : collectionName === "folders"
-        ? testStore.folders
-        : testStore.notes;
-
-    const existing = storeMap.get(id);
+    const store = testStoreCollection(collectionName);
+    const existing = store.get(id);
     const finalDoc = isUpdate ? { ...existing, ...data, id, user_id: grant.userId } : { ...data, id, user_id: grant.userId };
-    storeMap.set(id, finalDoc);
-    return collectionName === "tasks" ? stripRemovedTaskTimeFields(finalDoc) : finalDoc;
+    store.set(id, finalDoc);
+    return shapeCollectionDoc(collectionName, finalDoc);
   }
 
   const ref = adminDb().doc(`users/${grant.userId}/${collectionName}/${id}`);
@@ -222,11 +241,15 @@ async function saveDoc(
     await ref.update(data);
     const updated = await ref.get();
     const result = { id, ...updated.data() };
-    return collectionName === "tasks" ? stripRemovedTaskTimeFields(result) : result;
+    return shapeCollectionDoc(collectionName, result);
   } else {
-    await ref.set(data);
-    const result = { id, ...data };
-    return collectionName === "tasks" ? stripRemovedTaskTimeFields(result) : result;
+    // New documents must carry the owning user so the app (and scoped reads)
+    // can see them; never rewrite ownership on an update.
+    const payload = { ...data };
+    if (!payload.user_id) payload.user_id = grant.userId;
+    await ref.set(payload);
+    const result = { id, ...payload };
+    return shapeCollectionDoc(collectionName, result);
   }
 }
 
@@ -1025,6 +1048,614 @@ async function handlePatchCalendarEvent(grant: AssistantGrant, eventId: string, 
 }
 
 // -------------------------------------------------------------
+// Habits (عادت‌ها)
+// -------------------------------------------------------------
+
+/** ACT life domains accepted by Values & Goals. Mirrors `frontend/src/lib/valueDomains.ts`. */
+const MIND_VALUE_DOMAINS = [
+  "family",
+  "intimate",
+  "friendship",
+  "career",
+  "education",
+  "leisure",
+  "health",
+  "spiritual",
+  "citizenship",
+  "self",
+] as const;
+
+const MIND_GOAL_HORIZONS = ["today", "week", "month", "quarter", "year"] as const;
+
+/** A real calendar day in `YYYY-MM-DD` form (rejects 2026-02-30). */
+function isCalendarDate(value: unknown): value is string {
+  if (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+  const parsed = new Date(`${value}T00:00:00Z`);
+  return !Number.isNaN(parsed.getTime()) && parsed.toISOString().slice(0, 10) === value;
+}
+
+function normalizeShortString(value: unknown, max: number, label: string): { ok: true; value: string | null } | { ok: false; message: string } {
+  if (value === undefined || value === null) return { ok: true, value: null };
+  if (typeof value !== "string") return { ok: false, message: `${label} must be a string.` };
+  const trimmed = value.trim();
+  if (trimmed.length > max) return { ok: false, message: `${label} cannot exceed ${max} characters.` };
+  return { ok: true, value: trimmed || null };
+}
+
+/** `null` clears the score; otherwise an integer in [min, max]. */
+function invalidBoundedInteger(value: unknown, min: number, max: number, label: string): string | null {
+  if (value === undefined || value === null) return null;
+  if (typeof value !== "number" || !Number.isInteger(value) || value < min || value > max) {
+    return `${label} must be an integer between ${min} and ${max}, or null.`;
+  }
+  return null;
+}
+
+function invalidCompletedDates(value: unknown): string | null {
+  if (value === undefined) return null;
+  if (!Array.isArray(value)) return "'completed_dates' must be an array of dates.";
+  if (value.length > 400) return "'completed_dates' cannot contain more than 400 dates.";
+  for (const day of value) {
+    if (!isCalendarDate(day)) return "'completed_dates' entries must be valid YYYY-MM-DD dates.";
+  }
+  return null;
+}
+
+/** `expected_revision` is the `updated_at` the client last read. */
+function revisionConflict(existing: any, expected: unknown): boolean {
+  if (expected === undefined || expected === null) return false;
+  return typeof expected !== "string" || expected !== existing?.updated_at;
+}
+
+/** Response shape: never expose the owning `user_id`. */
+function habitView(doc: any) {
+  // The app stores completed days as `completedDates`; older documents and the
+  // REST contract use `completed_dates`. Read either, return the contract key.
+  const completedDates = Array.isArray(doc.completedDates)
+    ? doc.completedDates
+    : Array.isArray(doc.completed_dates)
+      ? doc.completed_dates
+      : [];
+  return {
+    id: doc.id,
+    title: doc.title,
+    frequency: doc.frequency ?? null,
+    color: doc.color ?? null,
+    streak: typeof doc.streak === "number" ? doc.streak : 0,
+    completed_dates: completedDates,
+    created_at: doc.created_at ?? null,
+    updated_at: doc.updated_at ?? null,
+  };
+}
+
+function validateHabitFields(body: any, { requireTitle }: { requireTitle: boolean }): { patch: Record<string, any> } | { error: string } {
+  const patch: Record<string, any> = {};
+
+  if (requireTitle || body?.title !== undefined) {
+    if (typeof body?.title !== "string" || !body.title.trim()) {
+      return { error: "Habit title is required." };
+    }
+    const title = body.title.trim();
+    if (title.length > 500) return { error: "Habit title cannot exceed 500 characters." };
+    patch.title = title;
+  }
+
+  const frequency = normalizeShortString(body?.frequency, 50, "'frequency'");
+  if ("message" in frequency) return { error: frequency.message };
+  if (body?.frequency !== undefined) patch.frequency = frequency.value;
+
+  const color = normalizeShortString(body?.color, 30, "'color'");
+  if ("message" in color) return { error: color.message };
+  if (body?.color !== undefined) patch.color = color.value;
+
+  if (body?.streak !== undefined) {
+    const invalid = invalidBoundedInteger(body.streak, 0, 10000, "'streak'");
+    if (invalid) return { error: invalid };
+    patch.streak = body.streak === null ? 0 : body.streak;
+  }
+
+  const datesError = invalidCompletedDates(body?.completed_dates);
+  if (datesError) return { error: datesError };
+  if (body?.completed_dates !== undefined) patch.completed_dates = body.completed_dates;
+
+  return { patch };
+}
+
+async function handleGetHabits(grant: AssistantGrant, query: any, res: any) {
+  const habits = await getCollectionDocs(grant, "habits");
+  habits.sort((a, b) => String(b.created_at || "").localeCompare(String(a.created_at || "")));
+  return sendJson(res, 200, paginateList(habits.map(habitView), Number(query.page || 1), Number(query.page_size || 50)));
+}
+
+async function handleCreateHabit(grant: AssistantGrant, body: any, req: any, res: any) {
+  const validated = validateHabitFields(body, { requireTitle: true });
+  if ("error" in validated) return sendError(res, 400, "VALIDATION_ERROR", validated.error);
+
+  const idempotencyKey = getIdempotencyKey(req, body);
+  if (idempotencyKey && idempotencyKey.length > 2048) {
+    return sendError(res, 400, "VALIDATION_ERROR", "Idempotency key is too long.");
+  }
+
+  const now = new Date().toISOString();
+  const id = `habit_${Date.now()}_${randomBytes(6).toString("hex")}`;
+  const habitData: any = {
+    id,
+    user_id: grant.userId,
+    title: validated.patch.title,
+    frequency: validated.patch.frequency ?? null,
+    color: validated.patch.color ?? null,
+    streak: validated.patch.streak ?? 0,
+    completedDates: validated.patch.completed_dates ?? [],
+    created_at: now,
+    updated_at: now,
+  };
+
+  const responseBody = { data: habitView(habitData), meta: { action: "created", timestamp: now } };
+
+  if (idempotencyKey) {
+    const result = await createEntityIdempotently(
+      grant, idempotencyKey, "habit_create", body, "habits", habitData, responseBody, "habits:create", habitData.title,
+    );
+    if (result.status === 409) return sendError(res, 409, "IDEMPOTENCY_CONFLICT", "The idempotency key was already used with different habit input.");
+    return sendJson(res, result.status, result.body);
+  }
+
+  const created = await saveDoc(grant, "habits", id, habitData, false);
+  await auditLog(grant, "habits:create", id, habitData.title);
+  return sendJson(res, 201, { ...responseBody, data: habitView(created) });
+}
+
+async function handleGetHabit(grant: AssistantGrant, habitId: string, res: any) {
+  const habit = await getDocById(grant, "habits", habitId);
+  if (!habit) return sendError(res, 404, "NOT_FOUND", "Habit not found.");
+  return sendJson(res, 200, { data: habitView(habit) });
+}
+
+async function handlePatchHabit(grant: AssistantGrant, habitId: string, body: any, res: any) {
+  const existing = await getDocById(grant, "habits", habitId);
+  if (!existing) return sendError(res, 404, "NOT_FOUND", "Habit not found.");
+  if (revisionConflict(existing, body?.expected_revision)) {
+    return sendError(res, 409, "REVISION_CONFLICT", "The habit changed since it was read. Read it again before editing.");
+  }
+
+  const validated = validateHabitFields(body, { requireTitle: false });
+  if ("error" in validated) return sendError(res, 400, "VALIDATION_ERROR", validated.error);
+  if (Object.keys(validated.patch).length === 0) {
+    return sendError(res, 400, "VALIDATION_ERROR", "No valid editable fields provided.");
+  }
+
+  const now = new Date().toISOString();
+  const patch: Record<string, any> = { ...validated.patch, updated_at: now };
+  if (validated.patch.completed_dates !== undefined) {
+    // Write the key the app reads; keep a legacy snake_case key in sync instead
+    // of leaving stale tick marks behind on pre-migration documents.
+    const dates = validated.patch.completed_dates;
+    delete patch.completed_dates;
+    patch.completedDates = dates;
+    if (Object.prototype.hasOwnProperty.call(existing, "completed_dates")) {
+      patch.completed_dates = dates;
+    }
+  }
+  const updated = await saveDoc(grant, "habits", habitId, patch, true);
+  await auditLog(grant, "habits:update", habitId, updated.title);
+
+  return sendJson(res, 200, { data: habitView(updated), meta: { action: "updated", timestamp: now } });
+}
+
+async function handleDeleteHabit(grant: AssistantGrant, habitId: string, res: any) {
+  const existing = await getDocById(grant, "habits", habitId);
+  if (!existing) return sendError(res, 404, "NOT_FOUND", "Habit not found.");
+
+  await deleteDocById(grant, "habits", habitId);
+  await auditLog(grant, "habits:delete", habitId, existing.title);
+  return sendJson(res, 200, { data: { id: habitId, deleted: true } });
+}
+
+// -------------------------------------------------------------
+// Daily check-ins (چک‌این روزانه) — one document per calendar day
+// -------------------------------------------------------------
+
+function checkinView(doc: any) {
+  return {
+    id: doc.id,
+    checkin_date: doc.checkin_date,
+    mood: doc.mood ?? null,
+    energy: doc.energy ?? null,
+    focus: doc.focus ?? null,
+    sleep_quality: doc.sleep_quality ?? null,
+    stress: doc.stress ?? null,
+    sleep_hours: doc.sleep_hours ?? null,
+    notes: doc.notes ?? null,
+    created_at: doc.created_at ?? null,
+    updated_at: doc.updated_at ?? null,
+  };
+}
+
+async function handleGetCheckins(grant: AssistantGrant, query: any, res: any) {
+  const from = query.from;
+  const to = query.to;
+  if (from !== undefined && !isCalendarDate(from)) return sendError(res, 400, "VALIDATION_ERROR", "'from' must be a valid YYYY-MM-DD date.");
+  if (to !== undefined && !isCalendarDate(to)) return sendError(res, 400, "VALIDATION_ERROR", "'to' must be a valid YYYY-MM-DD date.");
+  if (from && to && from > to) return sendError(res, 400, "VALIDATION_ERROR", "'from' cannot be after 'to'.");
+
+  let checkins = await getCollectionDocs(grant, "daily_checkins");
+  if (from) checkins = checkins.filter((c) => String(c.checkin_date || c.id || "") >= from);
+  if (to) checkins = checkins.filter((c) => String(c.checkin_date || c.id || "") <= to);
+  checkins.sort((a, b) => String(b.checkin_date || b.id || "").localeCompare(String(a.checkin_date || a.id || "")));
+
+  return sendJson(res, 200, paginateList(checkins.map(checkinView), Number(query.page || 1), Number(query.page_size || 50)));
+}
+
+async function handleGetCheckin(grant: AssistantGrant, date: string, res: any) {
+  if (!isCalendarDate(date)) return sendError(res, 400, "VALIDATION_ERROR", "Check-in date must be a valid YYYY-MM-DD date.");
+  const checkin = await getDocById(grant, "daily_checkins", date);
+  if (!checkin) return sendError(res, 404, "NOT_FOUND", "Check-in not found.");
+  return sendJson(res, 200, { data: checkinView(checkin) });
+}
+
+function validateCheckinFields(body: any): { patch: Record<string, any> } | { error: string } {
+  const patch: Record<string, any> = {};
+  for (const field of ["mood", "energy", "focus", "sleep_quality", "stress"] as const) {
+    if (body?.[field] === undefined) continue;
+    const invalid = invalidBoundedInteger(body[field], 1, 10, `'${field}'`);
+    if (invalid) return { error: invalid };
+    patch[field] = body[field];
+  }
+
+  if (body?.sleep_hours !== undefined) {
+    const hours = body.sleep_hours;
+    if (hours !== null && (typeof hours !== "number" || !Number.isFinite(hours) || hours < 0 || hours > 24)) {
+      return { error: "'sleep_hours' must be a number between 0 and 24, or null." };
+    }
+    patch.sleep_hours = hours;
+  }
+
+  if (body?.notes !== undefined) {
+    if (body.notes !== null && typeof body.notes !== "string") return { error: "'notes' must be a string or null." };
+    if (typeof body.notes === "string" && body.notes.length > 2000) return { error: "'notes' cannot exceed 2000 characters." };
+    patch.notes = body.notes;
+  }
+
+  return { patch };
+}
+
+async function handleSaveCheckin(grant: AssistantGrant, date: string, body: any, res: any) {
+  if (!isCalendarDate(date)) return sendError(res, 400, "VALIDATION_ERROR", "Check-in date must be a valid YYYY-MM-DD date.");
+
+  const validated = validateCheckinFields(body);
+  if ("error" in validated) return sendError(res, 400, "VALIDATION_ERROR", validated.error);
+  // A body carrying only a revision would create or touch an empty check-in.
+  if (Object.keys(validated.patch).length === 0) {
+    return sendError(res, 400, "VALIDATION_ERROR", "Provide at least one check-in field (mood, energy, focus, sleep_quality, stress, sleep_hours or notes).");
+  }
+
+  const now = new Date().toISOString();
+  const patch = { ...validated.patch, checkin_date: date, updated_at: now };
+
+  // The real store checks the revision and writes in one transaction, so two
+  // writers on the same day cannot both win over each other's fields.
+  if (!testStore.enabled) {
+    const ref = adminDb().doc(`users/${grant.userId}/daily_checkins/${date}`);
+    const outcome = await adminDb().runTransaction(async (tx) => {
+      const snapshot = await tx.get(ref);
+      const current = snapshot.exists ? { id: snapshot.id, ...snapshot.data() } : null;
+      if (current && revisionConflict(current, body?.expected_revision)) return { status: "conflict" as const };
+      if (current) {
+        tx.update(ref, patch);
+        return { status: "updated" as const, doc: { ...current, ...patch } };
+      }
+      const created = {
+        id: date,
+        user_id: grant.userId,
+        checkin_date: date,
+        mood: null,
+        energy: null,
+        focus: null,
+        sleep_quality: null,
+        stress: null,
+        sleep_hours: null,
+        notes: null,
+        ...patch,
+        created_at: now,
+      };
+      tx.set(ref, created);
+      return { status: "created" as const, doc: created };
+    });
+    if (outcome.status === "conflict") {
+      return sendError(res, 409, "REVISION_CONFLICT", "The check-in changed since it was read. Read it again before writing.");
+    }
+    // Audit records the day only: never the mood, sleep or notes text.
+    await auditLog(grant, "checkins:save", date);
+    return sendJson(res, outcome.status === "created" ? 201 : 200, {
+      data: checkinView({ id: date, ...outcome.doc }),
+      meta: { action: outcome.status, timestamp: now },
+    });
+  }
+
+  // The test store is in-process, so its revision check stays here.
+  const existing = await getDocById(grant, "daily_checkins", date);
+  if (existing && revisionConflict(existing, body?.expected_revision)) {
+    return sendError(res, 409, "REVISION_CONFLICT", "The check-in changed since it was read. Read it again before writing.");
+  }
+
+  let saved: any;
+  if (existing) {
+    saved = await saveDoc(grant, "daily_checkins", date, patch, true);
+  } else {
+    saved = await saveDoc(grant, "daily_checkins", date, {
+      id: date,
+      checkin_date: date,
+      mood: null,
+      energy: null,
+      focus: null,
+      sleep_quality: null,
+      stress: null,
+      sleep_hours: null,
+      notes: null,
+      ...patch,
+      created_at: now,
+    }, false);
+  }
+
+  // Audit records the day only: never the mood, sleep or notes text.
+  await auditLog(grant, "checkins:save", date);
+  return sendJson(res, existing ? 200 : 201, {
+    data: checkinView(saved),
+    meta: { action: existing ? "updated" : "created", timestamp: now },
+  });
+}
+
+// -------------------------------------------------------------
+// Mind goals & values (اهداف ذهنی و ارزش‌ها)
+// -------------------------------------------------------------
+
+function mindGoalView(doc: any) {
+  const view: Record<string, any> = { id: doc.id, domain: doc.domain, text: doc.text };
+  // `horizon` is stored only when the client supplied one; never a default.
+  if (doc.horizon !== undefined && doc.horizon !== null) view.horizon = doc.horizon;
+  view.created_at = doc.created_at ?? null;
+  view.updated_at = doc.updated_at ?? null;
+  return view;
+}
+
+function invalidMindDomain(value: unknown): string | null {
+  if (typeof value !== "string" || !(MIND_VALUE_DOMAINS as readonly string[]).includes(value)) {
+    return `'domain' must be one of: ${MIND_VALUE_DOMAINS.join(", ")}.`;
+  }
+  return null;
+}
+
+function invalidMindHorizon(value: unknown): string | null {
+  if (typeof value !== "string" || !(MIND_GOAL_HORIZONS as readonly string[]).includes(value)) {
+    return `'horizon' must be one of: ${MIND_GOAL_HORIZONS.join(", ")}.`;
+  }
+  return null;
+}
+
+function invalidMindText(value: unknown): string | null {
+  if (typeof value !== "string" || !value.trim()) return "'text' is required.";
+  if (value.trim().length > 2000) return "'text' cannot exceed 2000 characters.";
+  return null;
+}
+
+async function handleGetMindGoals(grant: AssistantGrant, query: any, res: any) {
+  if (query.domain !== undefined && invalidMindDomain(query.domain)) {
+    return sendError(res, 400, "VALIDATION_ERROR", invalidMindDomain(query.domain)!);
+  }
+  if (query.horizon !== undefined && invalidMindHorizon(query.horizon)) {
+    return sendError(res, 400, "VALIDATION_ERROR", invalidMindHorizon(query.horizon)!);
+  }
+
+  let goals = await getCollectionDocs(grant, "mind_goals");
+  if (query.domain !== undefined) goals = goals.filter((g) => g.domain === query.domain);
+  if (query.horizon !== undefined) goals = goals.filter((g) => g.horizon === query.horizon);
+  goals.sort((a, b) => String(b.created_at || "").localeCompare(String(a.created_at || "")));
+
+  return sendJson(res, 200, paginateList(goals.map(mindGoalView), Number(query.page || 1), Number(query.page_size || 50)));
+}
+
+async function handleCreateMindGoal(grant: AssistantGrant, body: any, req: any, res: any) {
+  const domainError = invalidMindDomain(body?.domain);
+  if (domainError) return sendError(res, 400, "VALIDATION_ERROR", domainError);
+  const textError = invalidMindText(body?.text);
+  if (textError) return sendError(res, 400, "VALIDATION_ERROR", textError);
+  if (body?.horizon !== undefined && body?.horizon !== null) {
+    const horizonError = invalidMindHorizon(body.horizon);
+    if (horizonError) return sendError(res, 400, "VALIDATION_ERROR", horizonError);
+  }
+
+  const idempotencyKey = getIdempotencyKey(req, body);
+  if (idempotencyKey && idempotencyKey.length > 2048) {
+    return sendError(res, 400, "VALIDATION_ERROR", "Idempotency key is too long.");
+  }
+
+  const now = new Date().toISOString();
+  const id = `goal_${Date.now()}_${randomBytes(6).toString("hex")}`;
+  const goalData: any = {
+    id,
+    user_id: grant.userId,
+    domain: body.domain,
+    text: body.text.trim(),
+    ...(body.horizon !== undefined && body.horizon !== null ? { horizon: body.horizon } : {}),
+    created_at: now,
+    updated_at: now,
+  };
+
+  const responseBody = { data: mindGoalView(goalData), meta: { action: "created", timestamp: now } };
+
+  if (idempotencyKey) {
+    // The goal text is personal reflection; audit keeps only the entity id.
+    const result = await createEntityIdempotently(
+      grant, idempotencyKey, "mind_goal_create", body, "mind_goals", goalData, responseBody, "mind_goal:create", null,
+    );
+    if (result.status === 409) return sendError(res, 409, "IDEMPOTENCY_CONFLICT", "The idempotency key was already used with different goal input.");
+    return sendJson(res, result.status, result.body);
+  }
+
+  const created = await saveDoc(grant, "mind_goals", id, goalData, false);
+  await auditLog(grant, "mind_goal:create", id);
+  return sendJson(res, 201, { ...responseBody, data: mindGoalView(created) });
+}
+
+async function handlePatchMindGoal(grant: AssistantGrant, goalId: string, body: any, res: any) {
+  const existing = await getDocById(grant, "mind_goals", goalId);
+  if (!existing) return sendError(res, 404, "NOT_FOUND", "Goal not found.");
+  if (revisionConflict(existing, body?.expected_revision)) {
+    return sendError(res, 409, "REVISION_CONFLICT", "The goal changed since it was read. Read it again before editing.");
+  }
+
+  const patch: Record<string, any> = {};
+  if (body?.domain !== undefined) {
+    const domainError = invalidMindDomain(body.domain);
+    if (domainError) return sendError(res, 400, "VALIDATION_ERROR", domainError);
+    patch.domain = body.domain;
+  }
+  if (body?.text !== undefined) {
+    const textError = invalidMindText(body.text);
+    if (textError) return sendError(res, 400, "VALIDATION_ERROR", textError);
+    patch.text = body.text.trim();
+  }
+  if (body?.horizon !== undefined) {
+    if (body.horizon === null) {
+      patch.horizon = null;
+    } else {
+      const horizonError = invalidMindHorizon(body.horizon);
+      if (horizonError) return sendError(res, 400, "VALIDATION_ERROR", horizonError);
+      patch.horizon = body.horizon;
+    }
+  }
+  if (Object.keys(patch).length === 0) {
+    return sendError(res, 400, "VALIDATION_ERROR", "No valid editable fields provided.");
+  }
+
+  const now = new Date().toISOString();
+  const updated = await saveDoc(grant, "mind_goals", goalId, { ...patch, updated_at: now }, true);
+  await auditLog(grant, "mind_goal:update", goalId);
+
+  return sendJson(res, 200, { data: mindGoalView(updated), meta: { action: "updated", timestamp: now } });
+}
+
+async function handleDeleteMindGoal(grant: AssistantGrant, goalId: string, res: any) {
+  const existing = await getDocById(grant, "mind_goals", goalId);
+  if (!existing) return sendError(res, 404, "NOT_FOUND", "Goal not found.");
+
+  await deleteDocById(grant, "mind_goals", goalId);
+  await auditLog(grant, "mind_goal:delete", goalId);
+  return sendJson(res, 200, { data: { id: goalId, deleted: true } });
+}
+
+function mindValuesView(doc: any) {
+  const values = doc?.values && typeof doc.values === "object" && !Array.isArray(doc.values) ? doc.values : {};
+  return { values, updated_at: typeof doc?.updated_at === "string" ? doc.updated_at : null };
+}
+
+async function handleGetMindValues(grant: AssistantGrant, res: any) {
+  const doc = await getDocById(grant, "mind_settings", "values");
+  return sendJson(res, 200, { data: mindValuesView(doc) });
+}
+
+/** Only the submitted domains and fields move; every other domain stays as it was. */
+function mergedMindValues(stored: any, submitted: any, domains: readonly string[]): Record<string, any> {
+  const storedValues = stored && typeof stored === "object" && !Array.isArray(stored) ? stored : {};
+  const merged: Record<string, any> = { ...storedValues };
+  for (const domain of domains) {
+    const before = merged[domain] && typeof merged[domain] === "object" && !Array.isArray(merged[domain]) ? merged[domain] : {};
+    merged[domain] = { ...before, ...(submitted as any)[domain] };
+  }
+  return merged;
+}
+
+async function handlePatchMindValues(grant: AssistantGrant, body: any, res: any) {
+  const submitted = body?.values;
+  if (!submitted || typeof submitted !== "object" || Array.isArray(submitted)) {
+    return sendError(res, 400, "VALIDATION_ERROR", "'values' must be an object keyed by domain.");
+  }
+  const domains = Object.keys(submitted);
+  if (domains.length === 0) return sendError(res, 400, "VALIDATION_ERROR", "Provide at least one domain in 'values'.");
+
+  const allowedFields = ["importance", "consistency", "value", "constraints"];
+  for (const domain of domains) {
+    if (!(MIND_VALUE_DOMAINS as readonly string[]).includes(domain)) {
+      return sendError(res, 400, "VALIDATION_ERROR", `Unknown value domain: ${domain}.`);
+    }
+    const entry = (submitted as any)[domain];
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+      return sendError(res, 400, "VALIDATION_ERROR", `'values.${domain}' must be an object.`);
+    }
+    for (const field of Object.keys(entry)) {
+      if (!allowedFields.includes(field)) return sendError(res, 400, "VALIDATION_ERROR", `Unknown field '${field}' in 'values.${domain}'.`);
+    }
+    for (const field of ["importance", "consistency"] as const) {
+      if (entry[field] === undefined) continue;
+      const invalid = invalidBoundedInteger(entry[field], 0, 10, `'values.${domain}.${field}'`);
+      if (invalid) return sendError(res, 400, "VALIDATION_ERROR", invalid);
+    }
+    for (const field of ["value", "constraints"] as const) {
+      if (entry[field] === undefined) continue;
+      if (entry[field] !== null && typeof entry[field] !== "string") {
+        return sendError(res, 400, "VALIDATION_ERROR", `'values.${domain}.${field}' must be a string or null.`);
+      }
+      if (typeof entry[field] === "string" && entry[field].length > 2000) {
+        return sendError(res, 400, "VALIDATION_ERROR", `'values.${domain}.${field}' cannot exceed 2000 characters.`);
+      }
+    }
+  }
+
+  // The real store merges inside a transaction: a concurrent write to another
+  // domain must never be overwritten by a stale read.
+  if (!testStore.enabled) {
+    const ref = adminDb().doc(`users/${grant.userId}/mind_settings/values`);
+    const outcome = await adminDb().runTransaction(async (tx) => {
+      const snapshot = await tx.get(ref);
+      const current = snapshot.exists ? { id: snapshot.id, ...snapshot.data() } : null;
+      if (current && revisionConflict(current, body?.expected_revision)) return { conflict: true as const };
+      const merged = mergedMindValues(current?.values, submitted, domains);
+      const timestamp = new Date().toISOString();
+      if (current) tx.update(ref, { values: merged, updated_at: timestamp });
+      else {
+        tx.set(ref, { id: "values", user_id: grant.userId, values: merged, created_at: timestamp, updated_at: timestamp });
+      }
+      return { conflict: false as const, merged, timestamp, created: !current };
+    });
+    if (outcome.conflict) {
+      return sendError(res, 409, "REVISION_CONFLICT", "Values changed since they were read. Read them again before writing.");
+    }
+    await auditLog(grant, "mind_values:update", "values");
+    return sendJson(res, 200, {
+      data: { values: outcome.merged, updated_at: outcome.timestamp },
+      meta: { action: outcome.created ? "created" : "updated", timestamp: outcome.timestamp },
+    });
+  }
+
+  const existing = await getDocById(grant, "mind_settings", "values");
+  if (existing && revisionConflict(existing, body?.expected_revision)) {
+    return sendError(res, 409, "REVISION_CONFLICT", "Values changed since they were read. Read them again before writing.");
+  }
+
+  // Merge only the submitted domains (and only their submitted fields); every
+  // other domain stays exactly as it was.
+  const merged = mergedMindValues(existing?.values, submitted, domains);
+
+  const now = new Date().toISOString();
+  if (existing) {
+    await saveDoc(grant, "mind_settings", "values", { values: merged, updated_at: now }, true);
+  } else {
+    await saveDoc(grant, "mind_settings", "values", {
+      id: "values",
+      values: merged,
+      created_at: now,
+      updated_at: now,
+    }, false);
+  }
+
+  await auditLog(grant, "mind_values:update", "values");
+  return sendJson(res, 200, {
+    data: { values: merged, updated_at: now },
+    meta: { action: existing ? "updated" : "created", timestamp: now },
+  });
+}
+
+// -------------------------------------------------------------
 // Agent Me & Audit Log
 // -------------------------------------------------------------
 
@@ -1061,9 +1692,18 @@ async function handleGetAuditLog(grant: AssistantGrant, query: any, res: any) {
 
   logs = logs.filter((entry) => {
     const domain = String(entry?.action || "").split(":")[0];
-    if (domain === "tasks" || domain === "folders" || domain === "memories" || domain === "calendar") {
-      return grantAllows(grant.userId, grant, `${domain}:read`);
-    }
+    const scopeByDomain: Record<string, AssistantScope> = {
+      tasks: "tasks:read",
+      folders: "folders:read",
+      memories: "memories:read",
+      calendar: "calendar:read",
+      habits: "habits:read",
+      checkins: "checkins:read",
+      mind_goal: "mind:read",
+      mind_values: "mind:read",
+    };
+    const required = scopeByDomain[domain];
+    if (required) return grantAllows(grant.userId, grant, required);
     return grantAllows(grant.userId, grant, "tasks:read");
   });
 
@@ -1145,7 +1785,10 @@ export async function handleAgentRequest(req: any, res: any): Promise<void> {
         grantAllows(grant.userId, grant, "tasks:read") ||
         grantAllows(grant.userId, grant, "folders:read") ||
         grantAllows(grant.userId, grant, "memories:read") ||
-        grantAllows(grant.userId, grant, "calendar:read");
+        grantAllows(grant.userId, grant, "calendar:read") ||
+        grantAllows(grant.userId, grant, "habits:read") ||
+        grantAllows(grant.userId, grant, "checkins:read") ||
+        grantAllows(grant.userId, grant, "mind:read");
       if (!canReadAudit) {
         return sendError(res, 403, "FORBIDDEN", "Insufficient scope. At least one read scope is required.");
       }
@@ -1312,6 +1955,119 @@ export async function handleAgentRequest(req: any, res: any): Promise<void> {
         if (!grant) return;
         const body = await parseBody(req);
         return await handlePatchCalendarEvent(grant, segments[2], body, res);
+      }
+    }
+
+    // 8. /api/v1/agent/habits...
+    if (segments[0] === "habits") {
+      if (segments.length === 1) {
+        if (method === "GET") {
+          const grant = await authenticateAssistant(req, res, "habits:read");
+          if (!grant) return;
+          return await handleGetHabits(grant, req.query || {}, res);
+        }
+        if (method === "POST") {
+          const grant = await authenticateAssistant(req, res, "habits:write");
+          if (!grant) return;
+          const body = await parseBody(req);
+          return await handleCreateHabit(grant, body, req, res);
+        }
+        return sendError(res, 405, "METHOD_NOT_ALLOWED", "Use GET or POST on /api/v1/agent/habits.");
+      }
+      if (segments.length === 2) {
+        if (method === "GET") {
+          const grant = await authenticateAssistant(req, res, "habits:read");
+          if (!grant) return;
+          return handleGetHabit(grant, segments[1], res);
+        }
+        if (method === "PATCH") {
+          const grant = await authenticateAssistant(req, res, "habits:write");
+          if (!grant) return;
+          const body = await parseBody(req);
+          return await handlePatchHabit(grant, segments[1], body, res);
+        }
+        if (method === "DELETE") {
+          const grant = await authenticateAssistant(req, res, "habits:write");
+          if (!grant) return;
+          return await handleDeleteHabit(grant, segments[1], res);
+        }
+        return sendError(res, 405, "METHOD_NOT_ALLOWED", "Use GET, PATCH or DELETE on a habit.");
+      }
+    }
+
+    // 9. /api/v1/agent/checkins... (one document per calendar day)
+    if (segments[0] === "checkins") {
+      if (segments.length === 1) {
+        if (method === "GET") {
+          const grant = await authenticateAssistant(req, res, "checkins:read");
+          if (!grant) return;
+          return await handleGetCheckins(grant, req.query || {}, res);
+        }
+        return sendError(res, 405, "METHOD_NOT_ALLOWED", "Use GET on /api/v1/agent/checkins.");
+      }
+      if (segments.length === 2) {
+        if (method === "GET") {
+          const grant = await authenticateAssistant(req, res, "checkins:read");
+          if (!grant) return;
+          return await handleGetCheckin(grant, segments[1], res);
+        }
+        if (method === "PUT") {
+          const grant = await authenticateAssistant(req, res, "checkins:write");
+          if (!grant) return;
+          const body = await parseBody(req);
+          return await handleSaveCheckin(grant, segments[1], body, res);
+        }
+        return sendError(res, 405, "METHOD_NOT_ALLOWED", "Use GET or PUT on a daily check-in.");
+      }
+    }
+
+    // 10. /api/v1/agent/mind/goals...
+    if (segments[0] === "mind" && segments[1] === "goals") {
+      if (segments.length === 2) {
+        if (method === "GET") {
+          const grant = await authenticateAssistant(req, res, "mind:read");
+          if (!grant) return;
+          return handleGetMindGoals(grant, req.query || {}, res);
+        }
+        if (method === "POST") {
+          const grant = await authenticateAssistant(req, res, "mind:write");
+          if (!grant) return;
+          const body = await parseBody(req);
+          return await handleCreateMindGoal(grant, body, req, res);
+        }
+        return sendError(res, 405, "METHOD_NOT_ALLOWED", "Use GET or POST on /api/v1/agent/mind/goals.");
+      }
+      if (segments.length === 3) {
+        if (method === "PATCH") {
+          const grant = await authenticateAssistant(req, res, "mind:write");
+          if (!grant) return;
+          const body = await parseBody(req);
+          return await handlePatchMindGoal(grant, segments[2], body, res);
+        }
+        if (method === "DELETE") {
+          const grant = await authenticateAssistant(req, res, "mind:write");
+          if (!grant) return;
+          return await handleDeleteMindGoal(grant, segments[2], res);
+        }
+        return sendError(res, 405, "METHOD_NOT_ALLOWED", "Use PATCH or DELETE on a goal.");
+      }
+    }
+
+    // 11. /api/v1/agent/mind/values
+    if (segments[0] === "mind" && segments[1] === "values") {
+      if (segments.length === 2) {
+        if (method === "GET") {
+          const grant = await authenticateAssistant(req, res, "mind:read");
+          if (!grant) return;
+          return await handleGetMindValues(grant, res);
+        }
+        if (method === "PATCH") {
+          const grant = await authenticateAssistant(req, res, "mind:write");
+          if (!grant) return;
+          const body = await parseBody(req);
+          return await handlePatchMindValues(grant, body, res);
+        }
+        return sendError(res, 405, "METHOD_NOT_ALLOWED", "Use GET or PATCH on /api/v1/agent/mind/values.");
       }
     }
 

@@ -11,6 +11,7 @@ const templateMocks = vi.hoisted(() => ({
   save: vi.fn((..._args: any[]) => Promise.resolve(null as any)),
   remove: vi.fn(() => Promise.resolve()),
   persist: vi.fn((_userId: string, _task: any): Promise<"saved" | "queued" | "failed"> => Promise.resolve("saved")),
+  upsert: vi.fn((_userId: string, _task: any): Promise<boolean> => Promise.resolve(true)),
 }));
 
 vi.mock("@/lib/offlineQueue", () => ({
@@ -54,7 +55,7 @@ vi.mock("@/lib/taskTemplates", () => ({
 }));
 
 vi.mock("@/lib/firestoreDataService", () => ({
-  upsertTask: vi.fn(() => Promise.resolve(true)),
+  upsertTask: templateMocks.upsert,
   persistTask: templateMocks.persist,
 }));
 
@@ -75,6 +76,8 @@ describe("QuickAddTask component", () => {
     templateMocks.remove.mockResolvedValue();
     templateMocks.persist.mockReset();
     templateMocks.persist.mockResolvedValue("saved" as const);
+    templateMocks.upsert.mockReset();
+    templateMocks.upsert.mockResolvedValue(true);
     localStorage.clear();
     Object.defineProperty(navigator, "onLine", { configurable: true, value: true });
   });
@@ -156,6 +159,43 @@ describe("QuickAddTask component", () => {
     expect(onCreated).toHaveBeenCalledTimes(1);
     await waitFor(() => expect(screen.queryByPlaceholderText("+ Add task")).not.toBeInTheDocument());
     expect(toast.success).toHaveBeenCalledWith(expect.stringContaining("will sync"));
+  });
+
+  it("creates an inline folder task and keeps the chosen day and time when a repeat is added", async () => {
+    const onCreated = vi.fn();
+    render(
+      <MemoryRouter>
+        <QuickAddTask
+          placeholder="+ Add task"
+          defaults={{ folder_id: "folder-1", work_date: "2026-06-10" }}
+          onCreated={onCreated}
+        />
+      </MemoryRouter>
+    );
+
+    fireEvent.click(screen.getByText("+ Add task"));
+    fireEvent.change(screen.getByPlaceholderText("+ Add task"), { target: { value: "Folder task from plus" } });
+    fireEvent.click(screen.getByTitle("Set date and time"));
+    fireEvent.click(await screen.findByTestId("schedule-repeat"));
+    fireEvent.click(await screen.findByTestId("repeat-daily"));
+    fireEvent.click(screen.getByTestId("schedule-done"));
+    fireEvent.click(screen.getByTitle("Add task (Enter)"));
+
+    await waitFor(() => expect(templateMocks.upsert).toHaveBeenCalledTimes(1));
+    const [userId, payload] = templateMocks.upsert.mock.calls[0];
+    expect(userId).toBe("test-user-1");
+    expect(payload).toMatchObject({
+      title: "Folder task from plus",
+      user_id: "test-user-1",
+      folder_id: "folder-1",
+      work_date: "2026-06-10",
+      status: "todo",
+      completed: false,
+      recurrence: "daily",
+      recurrence_rule: { freq: "daily", interval: 1 },
+    });
+    expect(onCreated).toHaveBeenCalledTimes(1);
+    await waitFor(() => expect(screen.getByText("+ Add task")).toBeInTheDocument());
   });
 
   it("keeps the offline form intact and reports failure when the queue rejects the write", async () => {

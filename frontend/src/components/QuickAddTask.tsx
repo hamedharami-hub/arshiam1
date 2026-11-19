@@ -1149,7 +1149,12 @@ export function QuickAddTask({
                       delete scheduleOnly.recurrence;
                       delete scheduleOnly.reminder_plan;
                       delete scheduleOnly.reminder_at;
-                      setScheduleDraft((prev) => ({ ...(prev ?? {}), ...scheduleOnly }));
+                      // A repeat/reminder-only patch must not replace the draft: an
+                      // empty draft would drop the day or time the view (or the user)
+                      // had already chosen. Only real schedule fields start/merge one.
+                      if (Object.keys(scheduleOnly).length > 0) {
+                        setScheduleDraft((prev) => ({ ...(prev ?? {}), ...scheduleOnly }));
+                      }
                       if ("recurrence_rule" in patch) setRecurrence(patch.recurrence_rule ?? null);
                       if ("reminder_plan" in patch || "reminder_at" in patch) {
                         setReminder((cur) => ({

@@ -67,6 +67,8 @@ class FirestoreQuery<TData = Row[]> implements PromiseLike<Result<TData>> {
   private wantsCount = false;
   private headOnly = false;
   private serverOnly = false;
+  /** How long a read may wait for the shared live listener before reading directly. */
+  private liveWaitMs = 6000;
 
   constructor(private readonly table: string, private readonly ownerId = currentUserId()) {}
 
@@ -74,10 +76,14 @@ class FirestoreQuery<TData = Row[]> implements PromiseLike<Result<TData>> {
     return this.ownerId && currentUserId() === this.ownerId ? this.ownerId : null;
   }
 
-  select(_columns = "*", options?: { count?: "exact"; head?: boolean; source?: "default" | "server" }): this {
+  select(_columns = "*", options?: { count?: "exact"; head?: boolean; source?: "default" | "server" | "fast" }): this {
     this.wantsCount = options?.count === "exact";
     this.headOnly = !!options?.head;
     this.serverOnly = options?.source === "server";
+    // "fast" is for latency-sensitive reads such as global search: use rows the
+    // listener already has (cache included) and fall through to a direct read
+    // instead of waiting seconds for a cold listener's first server snapshot.
+    this.liveWaitMs = options?.source === "fast" ? 350 : 6000;
     return this;
   }
   returns<TNext = TData>(): FirestoreQuery<TNext> {
@@ -109,7 +115,7 @@ class FirestoreQuery<TData = Row[]> implements PromiseLike<Result<TData>> {
     const userId = this.activeOwnerId();
     if (!userId) return { data: null, error: new Error("برای دسترسی به داده وارد شوید") };
 
-    const live = this.serverOnly ? null : await liveRows(userId, this.table).catch(() => null);
+    const live = this.serverOnly ? null : await liveRows(userId, this.table, this.liveWaitMs).catch(() => null);
     if (this.activeOwnerId() !== userId) return { data: null, error: new Error("Account changed while reading.") };
     if (live) return this.shape(live.filter((row) => matches(row, this.filters)));
 

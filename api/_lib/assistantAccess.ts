@@ -19,6 +19,12 @@ export const ASSISTANT_SCOPES = [
   "notes:update",
   "diary:read",
   "diary:write",
+  "habits:read",
+  "habits:write",
+  "checkins:read",
+  "checkins:write",
+  "mind:read",
+  "mind:write",
   // Legacy / granular scopes:
   "tasks:create",
   "tasks:update",
@@ -43,6 +49,12 @@ export const testStore = {
   tasks: new Map<string, any>(),
   folders: new Map<string, any>(),
   notes: new Map<string, any>(),
+  habits: new Map<string, any>(),
+  /** Daily check-ins keyed by their date (`YYYY-MM-DD`). */
+  checkins: new Map<string, any>(),
+  mindGoals: new Map<string, any>(),
+  /** Per-user `mind_settings` documents; the values document uses id `values`. */
+  mindSettings: new Map<string, any>(),
   audit: [] as any[],
   reset() {
     this.grants.clear();
@@ -51,6 +63,10 @@ export const testStore = {
     this.tasks.clear();
     this.folders.clear();
     this.notes.clear();
+    this.habits.clear();
+    this.checkins.clear();
+    this.mindGoals.clear();
+    this.mindSettings.clear();
     this.audit = [];
   },
 };
@@ -169,6 +185,21 @@ export function grantAllows(
 
   // calendar:write implies calendar:read
   if (grant.scopes.includes("calendar:write") && scope === "calendar:read") {
+    return true;
+  }
+
+  // habits:write implies habits:read
+  if (grant.scopes.includes("habits:write") && scope === "habits:read") {
+    return true;
+  }
+
+  // checkins:write implies checkins:read
+  if (grant.scopes.includes("checkins:write") && scope === "checkins:read") {
+    return true;
+  }
+
+  // mind:write implies mind:read
+  if (grant.scopes.includes("mind:write") && scope === "mind:read") {
     return true;
   }
 

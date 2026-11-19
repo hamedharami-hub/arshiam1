@@ -38,6 +38,21 @@ describe("normalizeTaskWrite (legacy writers → single schedule)", () => {
     expect(out.deadline).toBeNull();
   });
 
+  it("keeps an explicit clock time and recurrence rule together in one panel write", () => {
+    const rule = { freq: "weekly" as const, interval: 1, byhour: 14, byminute: 30 };
+    const patch = normalizeTaskWrite({
+      id: "task-1",
+      ...schedulePatch(dateTimeSchedule("2026-11-18", "14:30")),
+      recurrence_rule: rule,
+      recurrence: "weekly",
+    }) as Record<string, unknown>;
+
+    expect(patch.recurrence_rule).toEqual(rule);
+    expect(patch.recurrence).toBe("weekly");
+    expect(patch.schedule_v).toBe(SCHEDULE_VERSION);
+    expect(readSchedule(patch as Partial<Task>)).toMatchObject({ kind: "datetime", date: "2026-11-18" });
+  });
+
   it("keeps the optional deadline date independent from every schedule patch", () => {
     const task = { deadline_date: "2026-06-24", ...schedulePatch({ kind: "day", date: "2026-06-18" }) };
     const cleared = { ...task, ...schedulePatch({ kind: "none" }) };

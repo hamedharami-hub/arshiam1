@@ -1638,6 +1638,924 @@
         },
         "x-openai-isConsequential": true
       }
+    },
+    "/api/v1/agent/habits": {
+      "get": {
+        "operationId": "listHabits",
+        "summary": "List habits",
+        "description": "Requires habits:read. Access is limited to the account associated with the token.",
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/Status200"
+          },
+          "400": {
+            "$ref": "#/components/responses/Status400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Status401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Status403"
+          },
+          "429": {
+            "$ref": "#/components/responses/Status429"
+          },
+          "503": {
+            "$ref": "#/components/responses/Status503"
+          }
+        },
+        "parameters": [
+          {
+            "name": "page",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "default": 1
+            }
+          },
+          {
+            "name": "page_size",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100,
+              "default": 50
+            }
+          }
+        ]
+      },
+      "post": {
+        "operationId": "createHabit",
+        "summary": "Create a habit",
+        "description": "Requires habits:write. Access is limited to the account associated with the token.",
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/Status200"
+          },
+          "201": {
+            "$ref": "#/components/responses/Status201"
+          },
+          "400": {
+            "$ref": "#/components/responses/Status400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Status401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Status403"
+          },
+          "409": {
+            "$ref": "#/components/responses/Status409"
+          },
+          "429": {
+            "$ref": "#/components/responses/Status429"
+          },
+          "503": {
+            "$ref": "#/components/responses/Status503"
+          }
+        },
+        "parameters": [
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "schema": {
+              "type": "string"
+            },
+            "description": "Unique for each intended creation; reuse only on retries of the same request."
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "title": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 500
+                  },
+                  "frequency": {
+                    "type": "string",
+                    "maxLength": 50,
+                    "nullable": true
+                  },
+                  "color": {
+                    "type": "string",
+                    "maxLength": 30,
+                    "nullable": true
+                  },
+                  "streak": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 10000
+                  },
+                  "completed_dates": {
+                    "type": "array",
+                    "maxItems": 400,
+                    "items": {
+                      "type": "string",
+                      "format": "date"
+                    },
+                    "description": "Days the habit was completed, each a real YYYY-MM-DD date."
+                  }
+                },
+                "required": [
+                  "title"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "x-openai-isConsequential": true
+      }
+    },
+    "/api/v1/agent/habits/{id}": {
+      "get": {
+        "operationId": "getHabit",
+        "summary": "Get one habit",
+        "description": "Requires habits:read. Access is limited to the account associated with the token.",
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/Status200"
+          },
+          "400": {
+            "$ref": "#/components/responses/Status400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Status401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Status403"
+          },
+          "404": {
+            "$ref": "#/components/responses/Status404"
+          },
+          "429": {
+            "$ref": "#/components/responses/Status429"
+          },
+          "503": {
+            "$ref": "#/components/responses/Status503"
+          }
+        },
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "ID returned by a read/list operation."
+          }
+        ]
+      },
+      "patch": {
+        "operationId": "updateHabit",
+        "summary": "Update a habit",
+        "description": "Requires habits:write. Only the supplied fields change; expected_revision guards concurrent edits.",
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/Status200"
+          },
+          "400": {
+            "$ref": "#/components/responses/Status400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Status401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Status403"
+          },
+          "404": {
+            "$ref": "#/components/responses/Status404"
+          },
+          "409": {
+            "$ref": "#/components/responses/Status409"
+          },
+          "429": {
+            "$ref": "#/components/responses/Status429"
+          },
+          "503": {
+            "$ref": "#/components/responses/Status503"
+          }
+        },
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "ID returned by a read/list operation."
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "title": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 500
+                  },
+                  "frequency": {
+                    "type": "string",
+                    "maxLength": 50,
+                    "nullable": true
+                  },
+                  "color": {
+                    "type": "string",
+                    "maxLength": 30,
+                    "nullable": true
+                  },
+                  "streak": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 10000
+                  },
+                  "completed_dates": {
+                    "type": "array",
+                    "maxItems": 400,
+                    "items": {
+                      "type": "string",
+                      "format": "date"
+                    },
+                    "description": "Days the habit was completed, each a real YYYY-MM-DD date."
+                  },
+                  "expected_revision": {
+                    "type": "string",
+                    "nullable": true,
+                    "description": "Optional revision (the updated_at you last read). A mismatch returns 409 REVISION_CONFLICT."
+                  }
+                },
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "x-openai-isConsequential": true
+      },
+      "delete": {
+        "operationId": "deleteHabit",
+        "summary": "Delete a habit",
+        "description": "Requires habits:write. Deletes only the habit itself; check-ins and other records are untouched.",
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/Status200"
+          },
+          "401": {
+            "$ref": "#/components/responses/Status401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Status403"
+          },
+          "404": {
+            "$ref": "#/components/responses/Status404"
+          },
+          "429": {
+            "$ref": "#/components/responses/Status429"
+          },
+          "503": {
+            "$ref": "#/components/responses/Status503"
+          }
+        },
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "ID returned by a read/list operation."
+          }
+        ],
+        "x-openai-isConsequential": true
+      }
+    },
+    "/api/v1/agent/checkins": {
+      "get": {
+        "operationId": "listCheckins",
+        "summary": "List daily check-ins",
+        "description": "Requires checkins:read. Newest day first; the optional from/to window is inclusive.",
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/Status200"
+          },
+          "400": {
+            "$ref": "#/components/responses/Status400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Status401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Status403"
+          },
+          "429": {
+            "$ref": "#/components/responses/Status429"
+          },
+          "503": {
+            "$ref": "#/components/responses/Status503"
+          }
+        },
+        "parameters": [
+          {
+            "name": "from",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "format": "date"
+            }
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "format": "date"
+            }
+          },
+          {
+            "name": "page",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "default": 1
+            }
+          },
+          {
+            "name": "page_size",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100,
+              "default": 50
+            }
+          }
+        ]
+      }
+    },
+    "/api/v1/agent/checkins/{date}": {
+      "get": {
+        "operationId": "getCheckin",
+        "summary": "Get one day's check-in",
+        "description": "Requires checkins:read. The date is the document id (YYYY-MM-DD).",
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/Status200"
+          },
+          "400": {
+            "$ref": "#/components/responses/Status400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Status401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Status403"
+          },
+          "404": {
+            "$ref": "#/components/responses/Status404"
+          },
+          "429": {
+            "$ref": "#/components/responses/Status429"
+          },
+          "503": {
+            "$ref": "#/components/responses/Status503"
+          }
+        },
+        "parameters": [
+          {
+            "name": "date",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "date"
+            }
+          }
+        ]
+      },
+      "put": {
+        "operationId": "saveCheckin",
+        "summary": "Save a daily check-in (upsert)",
+        "description": "Requires checkins:write. One document per day: a second PUT on the same date updates it (200) instead of creating a duplicate (201). Only supplied fields change; created_at is kept.",
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/Status200"
+          },
+          "201": {
+            "$ref": "#/components/responses/Status201"
+          },
+          "400": {
+            "$ref": "#/components/responses/Status400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Status401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Status403"
+          },
+          "409": {
+            "$ref": "#/components/responses/Status409"
+          },
+          "429": {
+            "$ref": "#/components/responses/Status429"
+          },
+          "503": {
+            "$ref": "#/components/responses/Status503"
+          }
+        },
+        "parameters": [
+          {
+            "name": "date",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "date"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "mood": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 10,
+                    "nullable": true
+                  },
+                  "energy": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 10,
+                    "nullable": true
+                  },
+                  "focus": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 10,
+                    "nullable": true
+                  },
+                  "sleep_quality": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 10,
+                    "nullable": true
+                  },
+                  "stress": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 10,
+                    "nullable": true
+                  },
+                  "sleep_hours": {
+                    "type": "number",
+                    "minimum": 0,
+                    "maximum": 24,
+                    "nullable": true
+                  },
+                  "notes": {
+                    "type": "string",
+                    "maxLength": 2000,
+                    "nullable": true
+                  },
+                  "expected_revision": {
+                    "type": "string",
+                    "nullable": true,
+                    "description": "Optional revision (the updated_at you last read). A mismatch returns 409 REVISION_CONFLICT."
+                  }
+                },
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "x-openai-isConsequential": true
+      }
+    },
+    "/api/v1/agent/mind/goals": {
+      "get": {
+        "operationId": "listMindGoals",
+        "summary": "List mind goals",
+        "description": "Requires mind:read. Optionally filter by domain and/or horizon.",
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/Status200"
+          },
+          "400": {
+            "$ref": "#/components/responses/Status400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Status401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Status403"
+          },
+          "429": {
+            "$ref": "#/components/responses/Status429"
+          },
+          "503": {
+            "$ref": "#/components/responses/Status503"
+          }
+        },
+        "parameters": [
+          {
+            "name": "domain",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "family",
+                "intimate",
+                "friendship",
+                "career",
+                "education",
+                "leisure",
+                "health",
+                "spiritual",
+                "citizenship",
+                "self"
+              ]
+            }
+          },
+          {
+            "name": "horizon",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "today",
+                "week",
+                "month",
+                "quarter",
+                "year"
+              ]
+            }
+          },
+          {
+            "name": "page",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "default": 1
+            }
+          },
+          {
+            "name": "page_size",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100,
+              "default": 50
+            }
+          }
+        ]
+      },
+      "post": {
+        "operationId": "createMindGoal",
+        "summary": "Create a mind goal",
+        "description": "Requires mind:write. horizon is stored only when supplied; it is never defaulted.",
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/Status200"
+          },
+          "201": {
+            "$ref": "#/components/responses/Status201"
+          },
+          "400": {
+            "$ref": "#/components/responses/Status400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Status401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Status403"
+          },
+          "409": {
+            "$ref": "#/components/responses/Status409"
+          },
+          "429": {
+            "$ref": "#/components/responses/Status429"
+          },
+          "503": {
+            "$ref": "#/components/responses/Status503"
+          }
+        },
+        "parameters": [
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "schema": {
+              "type": "string"
+            },
+            "description": "Unique for each intended creation; reuse only on retries of the same request."
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "domain": {
+                    "type": "string",
+                    "enum": [
+                      "family",
+                      "intimate",
+                      "friendship",
+                      "career",
+                      "education",
+                      "leisure",
+                      "health",
+                      "spiritual",
+                      "citizenship",
+                      "self"
+                    ]
+                  },
+                  "text": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 2000
+                  },
+                  "horizon": {
+                    "type": "string",
+                    "enum": [
+                      "today",
+                      "week",
+                      "month",
+                      "quarter",
+                      "year"
+                    ],
+                    "nullable": true
+                  }
+                },
+                "required": [
+                  "domain",
+                  "text"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "x-openai-isConsequential": true
+      }
+    },
+    "/api/v1/agent/mind/goals/{id}": {
+      "patch": {
+        "operationId": "updateMindGoal",
+        "summary": "Update a mind goal",
+        "description": "Requires mind:write. Only the supplied fields change; expected_revision guards concurrent edits.",
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/Status200"
+          },
+          "400": {
+            "$ref": "#/components/responses/Status400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Status401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Status403"
+          },
+          "404": {
+            "$ref": "#/components/responses/Status404"
+          },
+          "409": {
+            "$ref": "#/components/responses/Status409"
+          },
+          "429": {
+            "$ref": "#/components/responses/Status429"
+          },
+          "503": {
+            "$ref": "#/components/responses/Status503"
+          }
+        },
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "ID returned by a read/list operation."
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "domain": {
+                    "type": "string",
+                    "enum": [
+                      "family",
+                      "intimate",
+                      "friendship",
+                      "career",
+                      "education",
+                      "leisure",
+                      "health",
+                      "spiritual",
+                      "citizenship",
+                      "self"
+                    ]
+                  },
+                  "text": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 2000
+                  },
+                  "horizon": {
+                    "type": "string",
+                    "enum": [
+                      "today",
+                      "week",
+                      "month",
+                      "quarter",
+                      "year"
+                    ],
+                    "nullable": true
+                  },
+                  "expected_revision": {
+                    "type": "string",
+                    "nullable": true,
+                    "description": "Optional revision (the updated_at you last read). A mismatch returns 409 REVISION_CONFLICT."
+                  }
+                },
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "x-openai-isConsequential": true
+      },
+      "delete": {
+        "operationId": "deleteMindGoal",
+        "summary": "Delete a mind goal",
+        "description": "Requires mind:write. Deletes only the goal; values and other records are untouched.",
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/Status200"
+          },
+          "401": {
+            "$ref": "#/components/responses/Status401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Status403"
+          },
+          "404": {
+            "$ref": "#/components/responses/Status404"
+          },
+          "429": {
+            "$ref": "#/components/responses/Status429"
+          },
+          "503": {
+            "$ref": "#/components/responses/Status503"
+          }
+        },
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "ID returned by a read/list operation."
+          }
+        ],
+        "x-openai-isConsequential": true
+      }
+    },
+    "/api/v1/agent/mind/values": {
+      "get": {
+        "operationId": "getMindValues",
+        "summary": "Read life-domain values",
+        "description": "Requires mind:read. Returns one stored document with the submitted domains.",
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/Status200"
+          },
+          "401": {
+            "$ref": "#/components/responses/Status401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Status403"
+          },
+          "429": {
+            "$ref": "#/components/responses/Status429"
+          },
+          "503": {
+            "$ref": "#/components/responses/Status503"
+          }
+        }
+      },
+      "patch": {
+        "operationId": "updateMindValues",
+        "summary": "Merge life-domain values",
+        "description": "Requires mind:write. Only the submitted domains and their submitted fields are merged; every other domain and field is preserved. expected_revision guards concurrent edits.",
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/Status200"
+          },
+          "400": {
+            "$ref": "#/components/responses/Status400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Status401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Status403"
+          },
+          "409": {
+            "$ref": "#/components/responses/Status409"
+          },
+          "429": {
+            "$ref": "#/components/responses/Status429"
+          },
+          "503": {
+            "$ref": "#/components/responses/Status503"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "values": {
+                    "type": "object",
+                    "minProperties": 1,
+                    "additionalProperties": {
+                      "type": "object",
+                      "properties": {
+                        "importance": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 10,
+                          "nullable": true
+                        },
+                        "consistency": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 10,
+                          "nullable": true
+                        },
+                        "value": {
+                          "type": "string",
+                          "maxLength": 2000,
+                          "nullable": true
+                        },
+                        "constraints": {
+                          "type": "string",
+                          "maxLength": 2000,
+                          "nullable": true
+                        }
+                      },
+                      "additionalProperties": false
+                    }
+                  },
+                  "expected_revision": {
+                    "type": "string",
+                    "nullable": true,
+                    "description": "Optional revision (the updated_at you last read). A mismatch returns 409 REVISION_CONFLICT."
+                  }
+                },
+                "required": [
+                  "values"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "x-openai-isConsequential": true
+      }
     }
   },
   "components": {

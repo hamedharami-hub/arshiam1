@@ -8,6 +8,7 @@ const mocks = vi.hoisted(() => ({
   cacheGet: vi.fn(),
   T: (_fa: string, en: string) => en,
   requests: [] as { table: string; owner: string; resolve: (value: any) => void; reject: (error: Error) => void }[],
+  selects: [] as { table: string; columns?: string; options?: Record<string, unknown> }[],
 }));
 
 vi.mock("@/hooks/useAuth", () => ({ useAuth: () => ({ user: mocks.user }) }));
@@ -17,11 +18,14 @@ vi.mock("@/lib/offlineQueue", () => ({ cacheGet: mocks.cacheGet }));
 vi.mock("@/lib/firebaseStore", () => ({
   firebaseStore: {
     from: (table: string) => ({
-      select: () => ({
-        eq: (_key: string, owner: string) => new Promise((resolve, reject) => {
-          mocks.requests.push({ table, owner, resolve, reject });
-        }),
-      }),
+      select: (columns?: string, options?: Record<string, unknown>) => {
+        mocks.selects.push({ table, columns, options });
+        return {
+          eq: (_key: string, owner: string) => new Promise((resolve, reject) => {
+            mocks.requests.push({ table, owner, resolve, reject });
+          }),
+        };
+      },
     }),
   },
 }));
@@ -34,6 +38,7 @@ beforeEach(() => {
   Object.defineProperty(HTMLElement.prototype, "scrollIntoView", { configurable: true, value: vi.fn() });
   mocks.user = { id: "alice" };
   mocks.requests = [];
+  mocks.selects = [];
   mocks.navigate.mockReset();
   mocks.cacheGet.mockReset().mockResolvedValue([]);
   localStorage.clear();
@@ -235,5 +240,17 @@ describe("CommandPalette search ownership and real cmdk filtering", () => {
     await act(async () => { await vi.advanceTimersByTimeAsync(100); });
     expect(listener).toHaveBeenCalledOnce();
     window.removeEventListener("lov:open-quick-capture", listener);
+  });
+
+  it("reads remote collections with the fast source so a cold listener never stalls search", async () => {
+    render(<CommandPalette />);
+    await openPalette();
+    await search("nebula");
+    const requests = await debounce();
+
+    expect(mocks.selects.map((select) => select.table).sort()).toEqual(["folders", "notes", "tags", "tasks"]);
+    expect(mocks.selects.every((select) => select.options?.source === "fast")).toBe(true);
+    await resolveBatch(requests, { tasks: [{ id: "t1", title: "nebula task" }] });
+    expect(screen.getByRole("option", { name: /nebula task/ })).toBeVisible();
   });
 });

@@ -120,6 +120,8 @@ export default function NewTaskView() {
 
   // Never send an empty local-only draft to the cloud. If an autosave had
   // already happened and the title was later cleared, queue a reliable delete.
+  // The draft state is only the mount snapshot, so compare against the editor's
+  // last written state: a task titled in the editor must not look empty here.
   useEffect(() => {
     return () => {
       if (savedRef.current) return;
@@ -235,6 +237,8 @@ export default function NewTaskView() {
         ref={detailRef}
         task={draft}
         mode="page"
+        createPayload={draft}
+        onTaskChange={(next) => { draftRef.current = next; }}
         onClose={handleBack}
         onSave={finish}
         onChanged={() => { persistedRef.current = true; }}

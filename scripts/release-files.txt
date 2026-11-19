@@ -1,0 +1,30 @@
+# ARSHNAZ release allowlist — the app changes that ship.
+#
+# `scripts/release.sh deploy` commits exactly these paths (in their own commit,
+# tagged), then pushes main. Everything else that happens to be dirty in the
+# working tree — for example the in-progress api/ agent work — is left untouched
+# and never ships.
+#
+# Keep this list exact: deploy refuses to run if a listed file has no change, or
+# if the staged set is not byte-for-byte this list.
+#
+# --- bug 1: global search waited ~6s on a cold live listener -----------------
+frontend/src/components/CommandPalette.tsx
+frontend/src/components/CommandPalette.test.tsx
+frontend/src/lib/firebaseStore.ts
+frontend/src/lib/firestoreLive.ts
+frontend/src/lib/firestoreLive.test.ts
+
+# --- bug 2: the floating "+" opened a task that was not in the folder --------
+# The first write now carries the page context, and leaving the page no longer
+# deletes the task the user just titled.
+frontend/src/components/TaskDetail.tsx
+frontend/src/pages/NewTaskView.tsx
+frontend/src/pages/NewTaskView.folderContext.test.tsx
+
+# The inline "+" path (QuickAddTask) is unchanged; this test pins it.
+frontend/src/components/QuickAddTask.test.tsx
+
+# --- bug 3: day/time was dropped when a repeat was chosen --------------------
+frontend/src/components/QuickAddTask.tsx
+frontend/src/lib/taskScheduleAdapters.test.ts

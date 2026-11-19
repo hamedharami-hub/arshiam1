@@ -1,0 +1,10 @@
+# ARSHNAZ release tooling — runbook and the driver itself.
+#
+# These ship in their own commit, BEFORE the app commit, so that rolling back a
+# bad app release still leaves the runbook and this script on main (a rollback
+# must not delete the tool that performs the next rollback).
+scripts/release-tooling.txt
+scripts/release-files.txt
+scripts/release.sh
+docs/RELEASE-RUNBOOK-FA.md
+docs/BUG2-VERDICT-FA.md
